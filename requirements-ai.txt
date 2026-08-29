@@ -1,0 +1,8 @@
+# OPTIONAL: only needed if you want live Gemini AI responses instead of Demo Mode.
+# Installing this on Streamlit Community Cloud can sometimes fail/timeout because of
+# its heavy dependency tree (grpcio, protobuf, google-auth, etc). The app works
+# perfectly well without it (it automatically falls back to Demo Mode).
+#
+# To enable: append this file's contents into requirements.txt, then add your
+# AI_API_KEY in Streamlit Cloud's "Secrets" settings.
+google-generativeai==0.8.3

@@ -1,0 +1,204 @@
+{
+  "sample_trips": [
+    {
+      "id": "trip_001",
+      "title": "Mysuru Royal Weekend",
+      "destination": "Mysuru",
+      "origin": "Bengaluru",
+      "duration": 2,
+      "travelers": 4,
+      "budget": 4000,
+      "estimated_cost": 3600,
+      "travel_style": "Heritage & Culture",
+      "days": [
+        {
+          "day": 1,
+          "morning": {
+            "place": "Mysore Palace",
+            "activity": "Guided tour of the grand palace interiors",
+            "transport": "Auto from bus stand",
+            "cost": 200,
+            "duration": "2 hours"
+          },
+          "afternoon": {
+            "place": "Devaraja Market",
+            "activity": "Explore the vibrant local market",
+            "lunch": "Local darshini – idli, vada, dosa",
+            "transport": "Walking",
+            "cost": 120,
+            "duration": "2 hours"
+          },
+          "evening": {
+            "place": "Chamundi Hills",
+            "activity": "Sunset view and Chamundeshwari Temple visit",
+            "transport": "Shared auto",
+            "cost": 80,
+            "duration": "2 hours"
+          },
+          "night": {
+            "accommodation": "Budget Hostel near Palace",
+            "dinner": "Street food at Palace Road",
+            "cost": 450
+          }
+        },
+        {
+          "day": 2,
+          "morning": {
+            "place": "Brindavan Gardens",
+            "activity": "Morning stroll and photography",
+            "transport": "KSRTC local bus",
+            "cost": 60,
+            "duration": "2 hours"
+          },
+          "afternoon": {
+            "place": "Mysuru Zoo",
+            "activity": "Wildlife exploration – one of India's best zoos",
+            "lunch": "Zoo canteen / nearby restaurant",
+            "transport": "Auto",
+            "cost": 100,
+            "duration": "2 hours"
+          },
+          "evening": {
+            "place": "Jaganmohan Palace Art Gallery",
+            "activity": "Art and history tour",
+            "transport": "Walking",
+            "cost": 40,
+            "duration": "1.5 hours"
+          },
+          "night": {
+            "accommodation": "Return journey – KSRTC bus to Bengaluru",
+            "dinner": "Bus stand food stalls",
+            "cost": 250
+          }
+        }
+      ],
+      "budget_breakdown": {
+        "Transportation": 900,
+        "Accommodation": 900,
+        "Food": 900,
+        "Activities": 600,
+        "Miscellaneous": 300
+      },
+      "tips": [
+        "Book return KSRTC bus tickets in advance on the KSRTC website.",
+        "Palace illumination is on Tue, Sat, Sun evenings – plan accordingly.",
+        "Student entry discounts available at the zoo and some monuments.",
+        "Carry a student ID card for discounts."
+      ]
+    },
+    {
+      "id": "trip_002",
+      "title": "Hampi Backpacker Adventure",
+      "destination": "Hampi",
+      "origin": "Bengaluru",
+      "duration": 2,
+      "travelers": 3,
+      "budget": 3000,
+      "estimated_cost": 2700,
+      "travel_style": "Heritage & Adventure",
+      "days": [
+        {
+          "day": 1,
+          "morning": {
+            "place": "Virupaksha Temple",
+            "activity": "Early morning puja and temple exploration",
+            "transport": "Walk from guesthouse",
+            "cost": 50,
+            "duration": "2 hours"
+          },
+          "afternoon": {
+            "place": "Vittala Temple & Stone Chariot",
+            "activity": "Explore the iconic stone chariot and musical pillars",
+            "lunch": "Local dhaba near temple",
+            "transport": "Rented bicycle",
+            "cost": 250,
+            "duration": "3 hours"
+          },
+          "evening": {
+            "place": "Matanga Hill",
+            "activity": "Sunset trek – 360° view of Hampi ruins",
+            "transport": "Bicycle",
+            "cost": 0,
+            "duration": "2 hours"
+          },
+          "night": {
+            "accommodation": "Guesthouse across the river (Virupapur Gadde)",
+            "dinner": "Riverside restaurant",
+            "cost": 400
+          }
+        },
+        {
+          "day": 2,
+          "morning": {
+            "place": "Hemakuta Hill",
+            "activity": "Sunrise over ancient Jain temples",
+            "transport": "Walk",
+            "cost": 0,
+            "duration": "1.5 hours"
+          },
+          "afternoon": {
+            "place": "Elephant Stables & Lotus Mahal",
+            "activity": "Royal enclosure exploration",
+            "lunch": "Local café",
+            "transport": "Bicycle",
+            "cost": 150,
+            "duration": "2 hours"
+          },
+          "evening": {
+            "place": "Tungabhadra River Coracle Ride",
+            "activity": "Traditional coracle boat ride",
+            "transport": "Self",
+            "cost": 100,
+            "duration": "1 hour"
+          },
+          "night": {
+            "accommodation": "Night bus back to Bengaluru",
+            "dinner": "Takeaway food for bus journey",
+            "cost": 350
+          }
+        }
+      ],
+      "budget_breakdown": {
+        "Transportation": 900,
+        "Accommodation": 600,
+        "Food": 700,
+        "Activities": 350,
+        "Miscellaneous": 150
+      },
+      "tips": [
+        "Rent a bicycle (₹100-150/day) – cheapest and best way to cover Hampi.",
+        "Carry water bottles – it gets very hot.",
+        "The ruins are spread over a large area – start early to cover more ground.",
+        "Guesthouses across the river are 40% cheaper than the main side."
+      ]
+    }
+  ],
+  "demo_itinerary_template": {
+    "trip_summary": {
+      "destination": "Mysuru",
+      "origin": "Bengaluru",
+      "duration": "2 Days",
+      "travelers": 2,
+      "total_budget": 4000,
+      "estimated_cost": 3400,
+      "savings": 600,
+      "travel_style": "Heritage & Culture"
+    },
+    "money_saving_tips": [
+      "Use KSRTC buses – they are the cheapest way to reach Mysuru from Bengaluru (₹150-200 one way).",
+      "Book accommodation near the Mysore Palace – walking distance saves auto costs.",
+      "Eat at local darshini restaurants instead of tourist restaurants – save ₹50-100 per meal.",
+      "Visit Brindavan Gardens in the morning (free entry) instead of the evening (paid illumination show).",
+      "Mysore Palace is free with student ID on certain days – carry your college ID.",
+      "Share an auto with other travelers to split costs."
+    ],
+    "potential_savings_amount": 600,
+    "safety_tips": [
+      "Keep a copy of your student ID and government ID separately.",
+      "Share your travel itinerary with a family member or friend.",
+      "Avoid isolated areas after 10 PM.",
+      "Save the local police helpline: 100.",
+      "Keep your phone charged and carry a power bank."
+    ]
+  }
+}
