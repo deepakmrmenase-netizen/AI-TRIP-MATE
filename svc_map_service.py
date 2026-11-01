@@ -22,7 +22,7 @@ try:
 except ImportError:
     FOLIUM_AVAILABLE = False
 
-from data_loader import load_destinations
+from data_loader import load_destinations, load_india_places
 
 _HEADERS = {"User-Agent": "TripMateAI-StudentProject/1.0 (streamlit app)"}
 _TIMEOUT = 8
@@ -40,6 +40,16 @@ _FALLBACK_CITIES = {
     "mumbai": (19.0760, 72.8777), "delhi": (28.6139, 77.2090),
     "chennai": (13.0827, 80.2707), "kolkata": (22.5726, 88.3639),
     "pune": (18.5204, 73.8567),
+    # Malnad / coastal Karnataka
+    "sringeri": (13.4167, 75.2500), "agumbe": (13.5089, 75.0905),
+    "horanadu": (13.2470, 75.3570), "kalasa": (13.2330, 75.3550),
+    "kudremukh": (13.2150, 75.2500), "dharmasthala": (12.9500, 75.3800),
+    "shivamogga": (13.9299, 75.5681), "shimoga": (13.9299, 75.5681),
+    "hassan": (13.0033, 76.1004), "belur": (13.1651, 75.8655),
+    "halebidu": (13.2130, 76.0080), "jog falls": (14.2293, 74.8125),
+    "gokarna": (14.5479, 74.3188), "murudeshwar": (14.0940, 74.4850),
+    "hubballi": (15.3647, 75.1240), "belagavi": (15.8497, 74.4977),
+    "kollur": (13.8630, 74.8140), "sakleshpur": (12.9440, 75.7840),
 }
 
 
@@ -55,28 +65,71 @@ def haversine_km(a, b) -> float:
 
 # ─── Geocoding ────────────────────────────────────────────────────────────────
 
-@st.cache_data(ttl=86400, show_spinner=False)
-def _nominatim_cached(query: str, india_first: bool = True):
-    """
-    Look a place up on OpenStreetMap. Returns (lat, lon), or None if there is genuinely no match.
-    Raises on network errors so a temporary failure is NOT cached.
-    """
+def _try_nominatim(query, india_first):
     attempts = [{"countrycodes": "in"}, {}] if india_first else [{}]
     answered = False
     for extra in attempts:
         try:
-            params = {"q": query, "format": "json", "limit": 1, **extra}
             resp = requests.get("https://nominatim.openstreetmap.org/search",
-                                params=params, headers=_HEADERS, timeout=_TIMEOUT)
+                                params={"q": query, "format": "json", "limit": 1, **extra},
+                                headers=_HEADERS, timeout=_TIMEOUT)
             if resp.status_code == 200:
                 answered = True
                 data = resp.json()
                 if data:
-                    return float(data[0]["lat"]), float(data[0]["lon"])
+                    return True, (float(data[0]["lat"]), float(data[0]["lon"]))
         except Exception:
             pass
-    if not answered:
-        raise RuntimeError("geocoding service unavailable")
+    return answered, None
+
+
+def _try_photon(query):
+    try:
+        resp = requests.get("https://photon.komoot.io/api/",
+                            params={"q": query, "limit": 1}, headers=_HEADERS, timeout=_TIMEOUT)
+        if resp.status_code == 200:
+            feats = resp.json().get("features", [])
+            if feats:
+                lon, lat = feats[0]["geometry"]["coordinates"]
+                return True, (float(lat), float(lon))
+            return True, None
+    except Exception:
+        pass
+    return False, None
+
+
+def _try_open_meteo(query):
+    try:
+        resp = requests.get("https://geocoding-api.open-meteo.com/v1/search",
+                            params={"name": query.split(",")[0].strip(), "count": 1, "language": "en"},
+                            headers=_HEADERS, timeout=_TIMEOUT)
+        if resp.status_code == 200:
+            res = resp.json().get("results", [])
+            if res:
+                return True, (float(res[0]["latitude"]), float(res[0]["longitude"]))
+            return True, None
+    except Exception:
+        pass
+    return False, None
+
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def _nominatim_cached(query: str, india_first: bool = True):
+    """
+    Find a place by trying up to three free geocoders in turn (OpenStreetMap Nominatim,
+    Photon, Open-Meteo). Returns (lat, lon), or None if none of them knows the place.
+    Raises if NO service could be reached at all, so a temporary outage is not cached.
+    """
+    any_answered = False
+    for attempt in (lambda: _try_nominatim(query, india_first),
+                    lambda: _try_photon(query),
+                    lambda: _try_open_meteo(query)):
+        answered, coords = attempt()
+        any_answered = any_answered or answered
+        if coords:
+            return coords
+    if not any_answered:
+        raise RuntimeError("geocoding services unavailable")
     return None
 
 
@@ -101,6 +154,9 @@ def lookup_coordinates(name: str):
         row = df[df["destination"].str.lower() == key]
         if not row.empty:
             return float(row.iloc[0]["latitude"]), float(row.iloc[0]["longitude"])
+    hit = _india_index().get(key)
+    if hit:
+        return hit
     if key in _FALLBACK_CITIES:
         return _FALLBACK_CITIES[key]
     return _nominatim(name.strip())
@@ -109,6 +165,132 @@ def lookup_coordinates(name: str):
 def get_coordinates(location_name: str):
     """Backward-compatible helper: always returns a coordinate (Bengaluru if unknown)."""
     return lookup_coordinates(location_name) or (12.9716, 77.5946)
+
+
+# ─── All-India places: lookup + suggestions ───────────────────────────────────
+
+TIER_COLORS = {"Cheap": "green", "Mid-range": "blue", "Royal / Luxury": "purple"}
+TIER_HEX = {"Cheap": "#16a34a", "Mid-range": "#2563eb", "Royal / Luxury": "#7e22ce"}
+CATEGORY_ICONS = {
+    "Heritage & Royal": "university", "Nature & Hills": "tree", "Beach & Islands": "umbrella",
+    "Spiritual": "bell", "City & Culture": "building", "Wildlife & Adventure": "paw",
+    "Luxury Stay": "diamond",
+}
+
+
+def _india_index() -> dict:
+    """name / alias (lower-case) -> (lat, lon) for every place in the all-India list."""
+    idx = {}
+    try:
+        df = load_india_places()
+        for _, r in df.iterrows():
+            pt = (float(r["latitude"]), float(r["longitude"]))
+            idx[str(r["place"]).strip().lower()] = pt
+            for a in str(r["aliases"]).split(";"):
+                if a.strip():
+                    idx.setdefault(a.strip().lower(), pt)
+    except Exception:
+        pass
+    return idx
+
+
+def _dataset_matches(query: str, limit: int) -> list:
+    q = query.strip().lower()
+    out = []
+    try:
+        df = load_india_places()
+    except Exception:
+        return out
+    scored = []
+    for _, r in df.iterrows():
+        names = [str(r["place"]).lower()] + [a.strip().lower() for a in str(r["aliases"]).split(";") if a.strip()]
+        if any(n == q for n in names):
+            score = 0
+        elif any(n.startswith(q) for n in names):
+            score = 1
+        elif any(q in n for n in names):
+            score = 2
+        else:
+            continue
+        scored.append((score, str(r["place"]), r))
+    scored.sort(key=lambda x: (x[0], x[1]))
+    for _, name, r in scored[:limit]:
+        out.append({"label": f"{name}, {r['state']}  ·  {r['tier']}", "name": name,
+                    "lat": float(r["latitude"]), "lon": float(r["longitude"])})
+    return out
+
+
+def _label_from_parts(*parts) -> str:
+    seen, clean = set(), []
+    for p in parts:
+        p = (p or "").strip()
+        if p and p.lower() not in seen:
+            seen.add(p.lower())
+            clean.append(p)
+    return ", ".join(clean)
+
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def _online_suggestions_cached(query: str):
+    """Places in India matching the text (landmarks, towns, temples...). Raises if all services are down."""
+    results, answered = [], False
+    try:
+        resp = requests.get("https://photon.komoot.io/api/",
+                            params={"q": query, "limit": 12, "lat": 22.5, "lon": 79.0},
+                            headers=_HEADERS, timeout=_TIMEOUT)
+        if resp.status_code == 200:
+            answered = True
+            for ft in resp.json().get("features", []):
+                p = ft.get("properties", {})
+                if p.get("countrycode", "").upper() != "IN" or not p.get("name"):
+                    continue
+                lon, lat = ft["geometry"]["coordinates"]
+                label = _label_from_parts(p.get("name"), p.get("city") or p.get("district") or p.get("county"), p.get("state"))
+                results.append({"label": label, "name": p["name"], "lat": float(lat), "lon": float(lon)})
+    except Exception:
+        pass
+    if not results:
+        try:
+            resp = requests.get("https://nominatim.openstreetmap.org/search",
+                                params={"q": query, "format": "json", "limit": 6,
+                                        "countrycodes": "in", "addressdetails": 1},
+                                headers=_HEADERS, timeout=_TIMEOUT)
+            if resp.status_code == 200:
+                answered = True
+                for it in resp.json():
+                    addr = it.get("address", {})
+                    name = it.get("name") or it.get("display_name", "").split(",")[0]
+                    area = addr.get("city") or addr.get("town") or addr.get("village") or addr.get("county")
+                    results.append({"label": _label_from_parts(name, area, addr.get("state")), "name": name,
+                                    "lat": float(it["lat"]), "lon": float(it["lon"])})
+        except Exception:
+            pass
+    if not answered:
+        raise RuntimeError("place search unavailable")
+    return results
+
+
+def suggest_places(query: str, limit: int = 6) -> list:
+    """
+    'Did you mean...' list for a typed place: the built-in all-India list first,
+    then any famous place / landmark / town in India from OpenStreetMap.
+    Each item: label, name, lat, lon.
+    """
+    query = (query or "").strip()
+    if len(query) < 2:
+        return []
+    out = _dataset_matches(query, 4)
+    if len(query) >= 3:
+        try:
+            online = _online_suggestions_cached(query)
+        except Exception:
+            online = []
+        have = {o["name"].lower() for o in out}
+        for o in online:
+            if o["name"].lower() not in have and len(out) < limit:
+                out.append(o)
+                have.add(o["name"].lower())
+    return out[:limit]
 
 
 # ─── Routing ──────────────────────────────────────────────────────────────────
@@ -461,3 +643,36 @@ def render_map(folium_map, height: int = 400):
         return st_folium(folium_map, height=height, width=None, returned_objects=[])
     except Exception:
         return None
+
+
+def build_india_map(places_df):
+    """
+    One map of all India: green = cheap, blue = mid-range, purple = royal / luxury.
+    The marker icon shows the type (palace, hills, beach, temple...).
+    """
+    if not FOLIUM_AVAILABLE:
+        return None, False
+
+    m = folium.Map(location=[22.5, 79.0], zoom_start=5, tiles="OpenStreetMap")
+    try:
+        from folium.plugins import MarkerCluster
+        layer = MarkerCluster(disable_clustering_at_zoom=8).add_to(m)
+    except Exception:
+        layer = m
+
+    for _, r in places_df.iterrows():
+        try:
+            tier = str(r["tier"])
+            html = (f"<b>{r['place']}</b><br>{r['state']} · {r['category']}<br>"
+                    f"<b>Rs.{int(r['budget_min']):,} - Rs.{int(r['budget_max']):,}</b> per person ({tier})<br>"
+                    f"{r['highlight']}")
+            folium.Marker(
+                [float(r["latitude"]), float(r["longitude"])],
+                popup=folium.Popup(html, max_width=280),
+                tooltip=f"{r['place']} - {tier}",
+                icon=folium.Icon(color=TIER_COLORS.get(tier, "blue"),
+                                 icon=CATEGORY_ICONS.get(str(r["category"]), "map-marker"), prefix="fa"),
+            ).add_to(layer)
+        except Exception:
+            continue
+    return m, True
