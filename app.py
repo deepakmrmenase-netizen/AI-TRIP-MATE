@@ -37,7 +37,11 @@ from comp_destination_card import render_destination_grid, render_budget_table
 from comp_chatbot import render_chatbot_page
 from svc_ai_service import generate_trip_plan, get_budget_optimization_tips
 from svc_travel_service import search_destinations, get_trips_under_budget, get_all_travel_types
-from svc_map_service import build_trip_map, build_destinations_map, render_map, FOLIUM_AVAILABLE
+from svc_map_service import (
+    build_trip_map, build_destinations_map, render_map, FOLIUM_AVAILABLE,
+    lookup_coordinates, get_route, estimate_travel_options, extract_stops,
+    format_hours, DAY_COLORS, find_places_along_route,
+)
 from svc_budget_service import apply_budget_split, calculate_budget, make_donut_chart
 from util_validators import validate_trip_form, validate_budget_inputs
 from util_helpers import (
@@ -334,24 +338,120 @@ def _render_trip_map_tab(trip: dict):
     summary = trip.get("trip_summary", {})
     origin = summary.get("origin", "Bengaluru")
     destination = summary.get("destination", "Mysuru")
-
-    st.markdown(f"""
-<div style="background:#f0fdf4; border-radius:12px; padding:14px 18px; margin-bottom:16px; font-size:0.88rem; color:#15803d;">
-  📍 <strong>{origin}</strong> → 🎯 <strong>{destination}</strong>
-</div>
-""", unsafe_allow_html=True)
-
     if FOLIUM_AVAILABLE:
-        with st.spinner("Loading map..."):
-            fmap, ok = build_trip_map(origin, destination)
-            if ok and fmap:
-                render_map(fmap, height=480)
-                st.caption("📌 Blue = Start | 🔴 Red = Destination | 🟢 Green = Attractions")
-            else:
-                st.info("Map could not be rendered.")
+        _render_map_dashboard(origin, destination, trip=trip, height=480)
     else:
         st.info("📦 Install `folium` and `streamlit-folium` for interactive maps: `pip install folium streamlit-folium`")
         _show_static_map_info(origin, destination)
+
+
+def _render_map_dashboard(origin: str, destination: str, trip: dict = None, height: int = 520):
+    """
+    Useful trip map: real road route, distance/time, travel-cost estimates,
+    and (when a trip plan exists) the itinerary places pinned by day.
+    """
+    import pandas as pd
+
+    o = lookup_coordinates(origin)
+    d = lookup_coordinates(destination)
+    missing = [name for name, c in ((origin, o), (destination, d)) if c is None]
+    if missing:
+        st.warning(
+            f"Couldn't find **{', '.join(missing)}** on the map. Check the spelling, "
+            "or add the state, e.g. *Sakleshpur, Karnataka*."
+        )
+        return
+
+    with st.spinner("Finding the best route..."):
+        route = get_route(o, d)
+
+    km = route["distance_km"]
+    mins = route["duration_min"]
+    options = estimate_travel_options(km, mins)
+    cheapest = min(options, key=lambda x: x["low"])
+
+    # Headline numbers
+    m1, m2, m3 = st.columns(3)
+    m1.metric("📏 Distance", f"{km:,.0f} km")
+    m2.metric("🚗 Road time", format_hours(mins / 60))
+    m3.metric("💰 Cheapest way", f"{cheapest['icon']} ₹{cheapest['low']:,}–{cheapest['high']:,}")
+    if not route["is_road"]:
+        st.caption("⚠️ Live road routing is unavailable right now, so distance and time are straight-line estimates.")
+
+    # Pin the itinerary places
+    stops = []
+    if trip:
+        with st.spinner("Pinning your itinerary places on the map (first time takes a few seconds)..."):
+            stops = extract_stops(trip, destination, d, max_stops=10)
+
+    # Famous places between start and destination
+    key_base = f"{origin}|{destination}".lower()
+    show_places = st.checkbox("📸 Show famous places on the way", value=True, key=f"show_places_{key_base}_{'trip' if trip else 'page'}")
+    places = []
+    if show_places:
+        with st.spinner("Looking for famous places along your route..."):
+            places = find_places_along_route(route["path"], radius_km=6.0, limit=15)
+
+    fmap, ok = build_trip_map(origin, destination, stops=stops, route=route,
+                              origin_coords=o, dest_coords=d, places=places)
+    if ok and fmap:
+        render_map(fmap, height=height)
+        legend = "🏠 Blue = Start &nbsp;|&nbsp; ⭐ Red = Destination"
+        if places:
+            legend += " &nbsp;|&nbsp; 📷 Orange = famous places on the way"
+        if stops:
+            days = sorted({int(s["day"]) for s in stops})
+            legend += " &nbsp;|&nbsp; Numbered pins = your plan: " + " ".join(
+                f'<span style="color:{DAY_COLORS[(x - 1) % len(DAY_COLORS)]};font-weight:700;">● Day {x}</span>'
+                for x in days
+            )
+        st.markdown(f'<div style="font-size:0.82rem;color:#64748b;margin:4px 0 12px 0;">{legend}</div>',
+                    unsafe_allow_html=True)
+    else:
+        st.info("Map could not be rendered.")
+
+    # Famous places list
+    if show_places:
+        st.markdown('<div class="tm-section-header">📸 Famous places on the way</div>', unsafe_allow_html=True)
+        if places:
+            rows_html = "".join(
+                f'<div style="display:flex;justify-content:space-between;gap:12px;padding:8px 0;border-bottom:1px solid #f1f5f9;">'
+                f'<span style="color:#1e293b;font-weight:600;">{p["kind"].split(" ", 1)[0]} {p["name"]}'
+                f' <span style="color:#64748b;font-weight:400;font-size:0.8rem;">· {p["kind"].split(" ", 1)[1]}</span></span>'
+                f'<span style="color:#2563eb;font-size:0.82rem;white-space:nowrap;">~{p["km_from_start"]:.0f} km from start'
+                f' · {p["off_route_km"]:.1f} km off route</span></div>'
+                for p in places
+            )
+            st.markdown(f'<div class="tm-card">{rows_html}</div>', unsafe_allow_html=True)
+            st.caption("From OpenStreetMap: well-known places within ~6 km of your route, in travel order.")
+        else:
+            st.info("No famous places found near this route (or the map data service is busy). Try again in a minute.")
+
+    # How to get there
+    st.markdown('<div class="tm-section-header">🚦 How to get there (estimates)</div>', unsafe_allow_html=True)
+    cols = st.columns(len(options))
+    for col, opt in zip(cols, options):
+        with col:
+            st.markdown(f"""
+<div class="tm-card" style="padding:14px 14px; text-align:center;">
+  <div style="font-size:1.6rem;">{opt['icon']}</div>
+  <div style="font-weight:700;color:#1e293b;font-size:0.82rem;margin:4px 0;">{opt['mode']}</div>
+  <div style="font-weight:700;color:#2563eb;">₹{opt['low']:,}–{opt['high']:,}</div>
+  <div style="color:#64748b;font-size:0.78rem;">about {format_hours(opt['hours'])}</div>
+  <div style="color:#94a3b8;font-size:0.72rem;margin-top:4px;">{opt['note']}</div>
+</div>
+""", unsafe_allow_html=True)
+    st.caption("Fares are rough per-person estimates (cab and bike are per vehicle). Verify before booking.")
+
+    # Stops table
+    if stops:
+        st.markdown('<div class="tm-section-header">📍 Your plan on the map</div>', unsafe_allow_html=True)
+        rows = [{"#": i, "Day": s["day"], "When": s["period"].title(), "Place": s["name"],
+                 "What to do": s["activity"], "Est. cost": f"₹{s['cost']}"}
+                for i, s in enumerate(stops, 1)]
+        st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
+    elif trip:
+        st.caption("Couldn't pin the individual itinerary places this time - the route above is still accurate.")
 
 
 def _show_static_map_info(origin, destination):
@@ -558,18 +658,21 @@ def page_trip_map():
     if st.button("🗺️ Show Map", use_container_width=True, type="primary"):
         if not map_origin.strip() or not map_dest.strip():
             st.error("Please enter both starting location and destination.")
-        elif FOLIUM_AVAILABLE:
-            with st.spinner("Loading map..."):
-                fmap, ok = build_trip_map(map_origin.strip(), map_dest.strip())
-                if ok and fmap:
-                    render_map(fmap, height=520)
-                    st.caption("📍 Blue = Start  |  🎯 Red = Destination")
-                else:
-                    st.error("Could not render map.")
+            st.session_state.pop("map_request", None)
+        else:
+            st.session_state["map_request"] = (map_origin.strip(), map_dest.strip())
+
+    req = st.session_state.get("map_request")
+    if req:
+        if FOLIUM_AVAILABLE:
+            # If the user already generated a plan for this destination, pin its places too
+            trip = st.session_state.get("generated_trip")
+            same = bool(trip) and str(trip.get("trip_summary", {}).get("destination", "")).strip().lower() == req[1].lower()
+            _render_map_dashboard(req[0], req[1], trip=trip if same else None, height=520)
         else:
             st.info("Map library not available. Showing location info instead.")
             df = load_destinations()
-            for loc, emoji in [(map_origin, "📍"), (map_dest, "🎯")]:
+            for loc, emoji in [(req[0], "📍"), (req[1], "🎯")]:
                 row = df[df["destination"].str.lower() == loc.strip().lower()]
                 if not row.empty:
                     r = row.iloc[0]
@@ -580,6 +683,8 @@ def page_trip_map():
   <span style="font-size:0.8rem;color:#94a3b8;">Coordinates: {r['latitude']}, {r['longitude']}</span>
 </div>
 """, unsafe_allow_html=True)
+    else:
+        st.info("Enter a start and destination (any city works), then click **Show Map** to see the road route, distance, travel costs and your itinerary places.")
 
     # Quick links to all destinations on map
     if FOLIUM_AVAILABLE:
