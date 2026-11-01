@@ -41,6 +41,7 @@ from svc_map_service import (
     build_trip_map, build_destinations_map, render_map, FOLIUM_AVAILABLE,
     lookup_coordinates, get_route, estimate_travel_options, extract_stops,
     format_hours, DAY_COLORS, find_places_along_route,
+    suggest_places, build_india_map, TIER_HEX,
 )
 from svc_budget_service import apply_budget_split, calculate_budget, make_donut_chart
 from util_validators import validate_trip_form, validate_budget_inputs
@@ -48,7 +49,7 @@ from util_helpers import (
     format_inr, calculate_duration, format_date_range,
     clean_interests, generate_trip_text,
 )
-from data_loader import load_destinations
+from data_loader import load_destinations, load_india_places, TIERS
 
 
 # ── Session State Init ─────────────────────────────────────────────────────────
@@ -145,7 +146,7 @@ def page_home():
     # Quick stats
     st.markdown('<div class="tm-section-header">📊 By The Numbers</div>', unsafe_allow_html=True)
     sc1, sc2, sc3, sc4 = st.columns(4)
-    sc1.metric("🌍 Destinations", "10+", "Karnataka & beyond")
+    sc1.metric("🌍 Places", f"{len(load_india_places())}+", "All across India")
     sc2.metric("💰 Avg. Student Budget", "₹3,000", "per weekend trip")
     sc3.metric("📅 Trip Durations", "1–7 days", "flexible planning")
     sc4.metric("🤖 AI-Powered", "Yes", "Gemini AI")
@@ -345,20 +346,22 @@ def _render_trip_map_tab(trip: dict):
         _show_static_map_info(origin, destination)
 
 
-def _render_map_dashboard(origin: str, destination: str, trip: dict = None, height: int = 520):
+def _render_map_dashboard(origin: str, destination: str, trip: dict = None, height: int = 520,
+                          o=None, d=None):
     """
     Useful trip map: real road route, distance/time, travel-cost estimates,
     and (when a trip plan exists) the itinerary places pinned by day.
     """
     import pandas as pd
 
-    o = lookup_coordinates(origin)
-    d = lookup_coordinates(destination)
+    o = o or lookup_coordinates(origin)
+    d = d or lookup_coordinates(destination)
     missing = [name for name, c in ((origin, o), (destination, d)) if c is None]
     if missing:
         st.warning(
             f"Couldn't find **{', '.join(missing)}** on the map. Check the spelling, "
-            "or add the state, e.g. *Sakleshpur, Karnataka*."
+            "or add the state, e.g. *Sringeri, Karnataka*. If the spelling is right, the map search "
+            "service may be busy - wait a few seconds and click Show Map again."
         )
         return
 
@@ -538,10 +541,10 @@ def page_explore():
         if FOLIUM_AVAILABLE:
             st.markdown('<div class="tm-section-header">🗺️ Destinations Map</div>', unsafe_allow_html=True)
             with st.spinner("Loading destinations map..."):
-                all_df = load_destinations()
-                fmap, ok = build_destinations_map(all_df)
+                fmap, ok = build_india_map(load_india_places())
                 if ok and fmap:
-                    render_map(fmap, height=400)
+                    render_map(fmap, height=460)
+                    st.caption("🟢 Cheap  |  🔵 Mid-range  |  🟣 Royal / Luxury - open the Trip Map page for filters and routes.")
         else:
             st.info("Install `folium` and `streamlit-folium` for an interactive destinations map.")
 
@@ -643,57 +646,134 @@ def page_budget_planner():
 #  PAGE: TRIP MAP
 # ══════════════════════════════════════════════════════════════════════════════
 
+def _place_picker(label: str, default_text: str, key: str):
+    """
+    Text box + 'did you mean' list so ANY place in India works: cities, towns, temples,
+    palaces, forts, beaches. Returns (name, (lat, lon) or None).
+    """
+    text = st.text_input(label, value=default_text, key=f"{key}_text",
+                         placeholder="e.g. Mysore Palace, Taj Mahal, Sringeri...").strip()
+    if not text:
+        return "", None
+    matches = suggest_places(text)
+    if matches:
+        idx = st.selectbox("Pick the exact place", options=list(range(len(matches))),
+                           format_func=lambda i: matches[i]["label"], key=f"{key}_pick_{text.lower()}")
+        m = matches[idx]
+        return m["name"], (m["lat"], m["lon"])
+    return text, lookup_coordinates(text)
+
+
 def page_trip_map():
     st.markdown('<div class="tm-section-header">🗺️ Trip Map</div>', unsafe_allow_html=True)
+    st.markdown('<p style="color:#64748b;margin-top:-8px;">Search any place in India - a city, a famous palace, a temple, a beach - '
+                'and get the road route, distance, travel cost and the famous places on the way.</p>', unsafe_allow_html=True)
 
     if not FOLIUM_AVAILABLE:
         st.warning("📦 Interactive maps require `folium` and `streamlit-folium`. Run: `pip install folium streamlit-folium`")
 
+    # a place chosen from the India explorer below is applied before the widgets are created
+    pending = st.session_state.pop("map_pending_dest", None)
+    if pending:
+        st.session_state["map_dest_text"] = pending
+
     col1, col2 = st.columns(2)
     with col1:
-        map_origin = st.text_input("📍 Starting Location", value=st.session_state.get("planner_origin", "Bengaluru"))
+        o_name, o_coords = _place_picker("📍 Starting Location", st.session_state.get("planner_origin", "Bengaluru"), "map_origin")
     with col2:
-        map_dest = st.text_input("🎯 Destination", value=st.session_state.get("planner_destination", "Mysuru"))
+        d_name, d_coords = _place_picker("🎯 Destination (any famous place)", st.session_state.get("planner_destination", "Mysuru"), "map_dest")
 
-    if st.button("🗺️ Show Map", use_container_width=True, type="primary"):
-        if not map_origin.strip() or not map_dest.strip():
+    if st.button("🗺️ Show Route & Map", use_container_width=True, type="primary"):
+        if not o_name or not d_name:
             st.error("Please enter both starting location and destination.")
             st.session_state.pop("map_request", None)
+        elif not o_coords or not d_coords:
+            st.error("Couldn't find one of the places. Check the spelling, or pick one from the list under the box.")
+            st.session_state.pop("map_request", None)
         else:
-            st.session_state["map_request"] = (map_origin.strip(), map_dest.strip())
+            st.session_state["map_request"] = (o_name, d_name, o_coords, d_coords)
 
     req = st.session_state.get("map_request")
     if req:
         if FOLIUM_AVAILABLE:
             # If the user already generated a plan for this destination, pin its places too
             trip = st.session_state.get("generated_trip")
-            same = bool(trip) and str(trip.get("trip_summary", {}).get("destination", "")).strip().lower() == req[1].lower()
-            _render_map_dashboard(req[0], req[1], trip=trip if same else None, height=520)
+            t_dest = str(trip.get("trip_summary", {}).get("destination", "")).strip().lower() if trip else ""
+            same = bool(t_dest) and (t_dest in req[1].lower() or req[1].lower() in t_dest)
+            _render_map_dashboard(req[0], req[1], trip=trip if same else None, height=520, o=req[2], d=req[3])
         else:
             st.info("Map library not available. Showing location info instead.")
-            df = load_destinations()
-            for loc, emoji in [(req[0], "📍"), (req[1], "🎯")]:
-                row = df[df["destination"].str.lower() == loc.strip().lower()]
-                if not row.empty:
-                    r = row.iloc[0]
-                    st.markdown(f"""
+            for loc, emoji, c in [(req[0], "📍", req[2]), (req[1], "🎯", req[3])]:
+                st.markdown(f"""
 <div class="tm-card">
   <strong>{emoji} {loc}</strong><br>
-  <span style="color:#64748b;font-size:0.85rem;">{r.get('description','')[:120]}...</span><br>
-  <span style="font-size:0.8rem;color:#94a3b8;">Coordinates: {r['latitude']}, {r['longitude']}</span>
+  <span style="font-size:0.8rem;color:#94a3b8;">Coordinates: {c[0]:.4f}, {c[1]:.4f}</span>
 </div>
 """, unsafe_allow_html=True)
     else:
-        st.info("Enter a start and destination (any city works), then click **Show Map** to see the road route, distance, travel costs and your itinerary places.")
+        st.info("Pick a start and a destination, then click **Show Route & Map**.")
 
-    # Quick links to all destinations on map
     if FOLIUM_AVAILABLE:
-        st.markdown('<div class="tm-section-header">🌍 All Destinations Map</div>', unsafe_allow_html=True)
-        with st.spinner("Loading all destinations..."):
-            all_df = load_destinations()
-            fmap2, ok2 = build_destinations_map(all_df)
-            if ok2 and fmap2:
-                render_map(fmap2, height=420)
+        _render_india_explorer(o_name, o_coords)
+
+
+def _render_india_explorer(o_name: str, o_coords):
+    """All-India map from cheap trips to royal / luxury stays, with filters and 'route to this place'."""
+    df = load_india_places()
+    st.markdown('<div class="tm-section-header">🇮🇳 Explore India - from budget trips to royal palaces</div>', unsafe_allow_html=True)
+    if df.empty:
+        st.info("Place data is not available.")
+        return
+    st.caption("Per-person estimates for a 2-3 day trip (stay, food, local travel, entry). Verify before booking.")
+
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        sel_tiers = st.multiselect("💰 Budget level", TIERS, default=TIERS, key="ie_tiers",
+                                   help="Cheap: under ₹2,500 · Mid-range: ₹2,500-7,999 · Royal / Luxury: ₹8,000+")
+    cats = sorted(df["category"].unique())
+    with c2:
+        sel_cats = st.multiselect("🏷️ Type", cats, default=cats, key="ie_cats")
+    with c3:
+        sel_states = st.multiselect("📍 State (optional)", sorted(df["state"].unique()), key="ie_states")
+
+    f = df[df["tier"].isin(sel_tiers) & df["category"].isin(sel_cats)]
+    if sel_states:
+        f = f[f["state"].isin(sel_states)]
+    f = f.sort_values(["budget_min", "place"]).reset_index(drop=True)
+
+    legend = " &nbsp;&nbsp; ".join(
+        f'<span style="color:{TIER_HEX[t]};font-weight:700;">● {t}</span>' for t in TIERS)
+    st.markdown(f'<div style="font-size:0.85rem;margin:4px 0 8px 0;color:#475569;"><b>{len(f)}</b> places &nbsp;|&nbsp; {legend}</div>',
+                unsafe_allow_html=True)
+
+    if f.empty:
+        st.info("No places match these filters. Try selecting more budget levels or types.")
+        return
+
+    fmap, ok = build_india_map(f)
+    if ok and fmap:
+        render_map(fmap, height=560)
+
+    st.markdown("#### 🧭 Get the route to any place on this map")
+    pick = st.selectbox(
+        "Choose a place", options=f.index.tolist(),
+        format_func=lambda i: f"{f.loc[i, 'place']} - {f.loc[i, 'state']}  ({f.loc[i, 'tier']}, from ₹{int(f.loc[i, 'budget_min']):,})",
+        key="ie_pick")
+    if st.button("🚗 Show route from my starting location", use_container_width=True, key="ie_go"):
+        if not o_coords:
+            st.error("Enter a valid starting location at the top first.")
+        else:
+            row = f.loc[pick]
+            st.session_state["map_pending_dest"] = str(row["place"])
+            st.session_state["map_request"] = (o_name, str(row["place"]),
+                                               o_coords, (float(row["latitude"]), float(row["longitude"])))
+            st.rerun()
+
+    show = f[["place", "state", "category", "tier", "budget_min", "budget_max", "highlight"]].copy()
+    show["Cost (₹, per person)"] = show.apply(lambda r: f"{int(r['budget_min']):,} - {int(r['budget_max']):,}", axis=1)
+    show = show.rename(columns={"place": "Place", "state": "State", "category": "Type", "tier": "Level", "highlight": "Known for"})
+    st.dataframe(show[["Place", "State", "Type", "Level", "Cost (₹, per person)", "Known for"]],
+                 hide_index=True, use_container_width=True)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
