@@ -71,7 +71,7 @@ def build_trip_map(origin: str, destination: str, attractions: list = None):
     m = folium.Map(
         location=[centre_lat, centre_lon],
         zoom_start=7,
-        tiles="CartoDB positron",
+        tiles="OpenStreetMap",
     )
 
     # Origin marker (blue)
@@ -148,7 +148,7 @@ def build_destinations_map(destinations_df):
         return None, False
 
     # Centre on India
-    m = folium.Map(location=[15.0, 78.0], zoom_start=5, tiles="CartoDB positron")
+    m = folium.Map(location=[15.0, 78.0], zoom_start=5, tiles="OpenStreetMap")
 
     for _, row in destinations_df.iterrows():
         try:
