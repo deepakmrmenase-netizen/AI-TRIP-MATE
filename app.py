@@ -42,6 +42,7 @@ from svc_map_service import (
     lookup_coordinates, get_route, estimate_travel_options, extract_stops,
     format_hours, DAY_COLORS, find_places_along_route,
     suggest_places, build_india_map, TIER_HEX,
+    google_maps_link, per_person_costs, _label as route_label,
 )
 from svc_budget_service import apply_budget_split, calculate_budget, make_donut_chart
 from util_validators import validate_trip_form, validate_budget_inputs
@@ -376,10 +377,31 @@ def _render_map_dashboard(origin: str, destination: str, trip: dict = None, heig
     with st.spinner("Finding the best route..."):
         route = get_route(o, d)
 
+    # Choose between alternative routes (like Google Maps)
+    alts = route.get("all") or []
+    if len(alts) > 1:
+        labels = [route_label(r) for r in alts]
+        pick = st.radio("🛣️ Choose a route", labels, index=0,
+                        key=f"route_pick_{origin}|{destination}".lower())
+        chosen = alts[labels.index(pick)]
+        route = dict(route)
+        route.update({k: chosen[k] for k in ("path", "distance_km", "duration_min", "steps", "via")})
+        # keep the chosen route first so the others are drawn grey
+        route["all"] = [chosen] + [r for r in alts if r is not chosen]
+
     km, mins = route["distance_km"], route["duration_min"]
     no_road = route.get("no_road", False)
-    options = estimate_travel_options(km, mins, road_available=not no_road)
-    cheapest = min(options, key=lambda x: x["low"])
+
+    tcol1, tcol2 = st.columns([1, 2])
+    with tcol1:
+        travelers = int(st.number_input("👥 Travellers", min_value=1, max_value=20, value=1, step=1,
+                                        key="map_travelers"))
+    with tcol2:
+        st.write("")
+        st.link_button("🗺️ Open this route in Google Maps", google_maps_link(o, d))
+
+    options = per_person_costs(estimate_travel_options(km, mins, road_available=not no_road), travelers)
+    cheapest = min(options, key=lambda x: x["pp_low"])
 
     m1, m2, m3 = st.columns(3)
     if no_road:
@@ -388,37 +410,44 @@ def _render_map_dashboard(origin: str, destination: str, trip: dict = None, heig
     else:
         m1.metric("📏 Distance by road" if route["is_road"] else "📏 Distance (estimate)", f"{km:,.0f} km")
         m2.metric("🚗 Drive time" if route["is_road"] else "🚗 Drive time (estimate)", format_hours(mins / 60))
-    m3.metric("💰 Cheapest way", f"{cheapest['icon']} ₹{cheapest['low']:,}–{cheapest['high']:,}")
+    m3.metric("💰 Cheapest (per person)", f"{cheapest['icon']} ₹{cheapest['pp_low']:,}–{cheapest['pp_high']:,}")
 
     if no_road:
         st.warning("There is no road connection between these two places (islands or overseas), so the distance "
                    "is a straight line. You will need a flight or a ship.")
     elif not route["is_road"]:
         st.caption("⚠️ The live road-routing service is busy, so distance and time are estimates. Try again in a minute.")
+    elif route.get("source") == "google":
+        st.caption("Distance and drive time from Google Maps (live traffic).")
     else:
-        st.caption("Distance is the real road distance. Drive time includes typical traffic (about 30% more than free-flow).")
+        st.caption("Real road distance from OpenStreetMap. Drive time includes typical traffic (about 30% more than free-flow).")
 
     show_places = st.checkbox("📸 Show famous places on the way", value=True,
                               key=f"show_places_{origin}|{destination}|{'trip' if trip else 'page'}".lower())
 
-    # 1) show the map straight away ...
+    # 1) show the map straight away, with the instant (built-in) famous places ...
     map_slot = st.empty()
-    fmap, ok = build_trip_map(origin, destination, route=route, origin_coords=o, dest_coords=d)
+    quick = []
+    if show_places and not no_road:
+        quick = find_places_along_route(route["path"], radius_km=6.0, limit=18, online=False)
+    fmap, ok = build_trip_map(origin, destination, route=route, origin_coords=o, dest_coords=d, places=quick)
     if not (ok and fmap):
         st.info("Map could not be rendered.")
         return
     with map_slot.container():
         render_map(fmap, height=height)
 
-    # 2) ... then add the slower things (famous places, itinerary stops) and redraw
-    places, stops = [], []
+    # 2) ... then add the slower things (more places from OpenStreetMap, itinerary stops) and redraw
+    places, stops = quick, []
     if show_places and not no_road:
-        with st.spinner("Looking for famous places along your route..."):
-            places = find_places_along_route(route["path"], radius_km=6.0, limit=15)
+        with st.spinner("Looking for more famous places along your route (a few seconds)..."):
+            full = find_places_along_route(route["path"], radius_km=6.0, limit=18, online=True)
+        if full:
+            places = full
     if trip:
         with st.spinner("Pinning your itinerary places on the map (first time takes a few seconds)..."):
             stops = extract_stops(trip, destination, d, max_stops=10)
-    if places or stops:
+    if len(places) != len(quick) or stops:
         fmap2, ok2 = build_trip_map(origin, destination, stops=stops, route=route,
                                     origin_coords=o, dest_coords=d, places=places)
         if ok2 and fmap2:
@@ -458,16 +487,26 @@ def _render_map_dashboard(origin: str, destination: str, trip: dict = None, heig
     cols = st.columns(len(options))
     for col, opt in zip(cols, options):
         with col:
+            vehicle_line = (
+                f'<div style="color:#64748b;font-size:0.74rem;">{opt["vehicles"]} vehicle(s): '
+                f'₹{opt["total_low"]:,}–{opt["total_high"]:,} total</div>' if opt.get("vehicles") else "")
             st.markdown(f"""
 <div class="tm-card" style="padding:14px 14px; text-align:center;">
   <div style="font-size:1.6rem;">{opt['icon']}</div>
   <div style="font-weight:700;color:#1e293b;font-size:0.82rem;margin:4px 0;">{opt['mode']}</div>
-  <div style="font-weight:700;color:#2563eb;">₹{opt['low']:,}–{opt['high']:,}</div>
+  <div style="font-weight:700;color:#2563eb;">₹{opt['pp_low']:,}–{opt['pp_high']:,} <span style="font-weight:400;font-size:0.72rem;">per person</span></div>
+  {vehicle_line}
   <div style="color:#64748b;font-size:0.78rem;">about {format_hours(opt['hours'])}</div>
   <div style="color:#94a3b8;font-size:0.72rem;margin-top:4px;">{opt['note']}</div>
 </div>
 """, unsafe_allow_html=True)
-    st.caption("Rough per-person fares (cab and bike are per vehicle, one way). Verify before booking.")
+    st.caption("Approximate one-way fares for your group. Cab, car and bike cost is shared between people. Tolls, food and stays are extra. Verify before booking.")
+
+    if route.get("steps"):
+        with st.expander("🧭 Turn-by-turn directions"):
+            for i, sp in enumerate(route["steps"], 1):
+                st.markdown(f"{i}. {sp['text']} &nbsp;<span style='color:#64748b'>({sp['km']:.1f} km)</span>",
+                            unsafe_allow_html=True)
 
     if stops:
         st.markdown('<div class="tm-section-header">📍 Your plan on the map</div>', unsafe_allow_html=True)
@@ -763,7 +802,8 @@ def _render_india_explorer(o_name: str, o_coords):
                 unsafe_allow_html=True)
 
     if f.empty:
-        st.info("No places match these filters. Try selecting more budget levels or types.")
+        st.info("No places match ALL these filters together (e.g. Royal + Beach + Karnataka has none). "
+                "Remove one filter - try clearing the State or Type box.")
         return
 
     fmap, ok = build_india_map(f)
@@ -787,6 +827,16 @@ def _render_india_explorer(o_name: str, o_coords):
     show = show.rename(columns={"place": "Place", "state": "State", "category": "Type", "tier": "Level", "highlight": "Known for"})
     st.dataframe(show[["Place", "State", "Type", "Level", "Cost (₹, per person)", "Known for"]],
                  hide_index=True, use_container_width=True)
+
+
+# Run the explorer as a Streamlit "fragment": changing its filters no longer re-runs the whole page
+# (route + places look-ups), so it stays fast. Falls back to a normal function on old Streamlit.
+try:
+    _wrapped = st.fragment(_render_india_explorer)
+    if callable(_wrapped):
+        _render_india_explorer = _wrapped
+except Exception:
+    pass
 
 
 # ══════════════════════════════════════════════════════════════════════════════
