@@ -224,3 +224,137 @@ def load_india_places() -> pd.DataFrame:
         return df
     except Exception:
         return pd.DataFrame(columns=cols)
+
+
+
+# ── Well-known stops along popular routes (instant, works offline) ──────────────
+_ROUTE_STOPS_CSV = """name,kind,latitude,longitude
+"Ramanagara (Sholay hills)","⛰️ Hills / Viewpoint",12.7150,77.2800
+"Channapatna (toy town)","🛍️ Town / Shopping",12.6517,77.2067
+"Maddur (Maddur vada)","🍽️ Food stop",12.5846,77.0446
+"Mandya","🏙️ Town",12.5218,76.8951
+"Srirangapatna","🏰 Fort / Heritage",12.4181,76.6946
+"Ranganathittu Bird Sanctuary","🦜 Wildlife / Birds",12.4244,76.6580
+"KRS Dam & Brindavan Gardens","💦 Dam / Garden",12.4255,76.5724
+"Kunigal","🏙️ Town",13.0230,77.0230
+"Shravanabelagola","🛕 Jain heritage",12.8548,76.4847
+"Hassan","🏙️ Town",13.0068,76.1004
+"Halebidu (Hoysaleswara Temple)","🛕 Heritage temple",13.2130,75.9948
+"Belur (Chennakeshava Temple)","🛕 Heritage temple",13.1650,75.8648
+"Chikkamagaluru","🏙️ Hill town",13.3153,75.7754
+"Mullayanagiri","⛰️ Highest peak in Karnataka",13.3910,75.7230
+"Baba Budangiri","⛰️ Hills / Viewpoint",13.3980,75.7410
+"Hebbe Falls","💦 Waterfall",13.3040,75.6500
+"Kemmannugundi","⛰️ Hill station",13.5280,75.7440
+"Kudremukh","⛰️ Hills / Trek",13.2166,75.2500
+"Horanadu (Annapoorneshwari)","🛕 Temple",13.2457,75.3567
+"Kalasa","🏙️ Town",13.2379,75.3590
+"Agumbe (sunset point)","🌄 Viewpoint",13.5034,75.0903
+"Sringeri (Sharada Peetham)","🛕 Temple",13.4167,75.2500
+"Tumakuru","🏙️ Town",13.3379,77.1173
+"Sira","🏙️ Town",13.7410,76.9040
+"Chitradurga Fort","🏰 Fort",14.2226,76.3980
+"Davanagere (benne dosa)","🍽️ Food stop",14.4644,75.9218
+"Haveri","🏙️ Town",14.7951,75.4000
+"Hubballi","🏙️ City",15.3647,75.1240
+"Dharwad (peda)","🍽️ Food stop",15.4589,75.0078
+"Belagavi (Kittur / Fort)","🏰 Fort / City",15.8497,74.4977
+"Dandeli (rafting)","🌿 Wildlife / Adventure",15.2500,74.6167
+"Hampi","🏛️ World Heritage",15.3350,76.4600
+"Badami caves","🛕 Cave temples",15.9149,75.6768
+"Pattadakal","🛕 World Heritage",15.9486,75.8167
+"Aihole","🛕 Heritage temples",16.0200,75.8800
+"Bijapur (Gol Gumbaz)","🕌 Monument",16.8302,75.7100
+"Bandipur National Park","🐅 Wildlife",11.6667,76.6333
+"Mudumalai Tiger Reserve","🐅 Wildlife",11.5667,76.5333
+"Gudalur","🏙️ Hill town",11.5030,76.4930
+"Coonoor (Sim's Park)","🌿 Hill station",11.3530,76.7959
+"Ooty Botanical Garden","🌿 Garden",11.4170,76.7110
+"Bylakuppe (Golden Temple)","🛕 Tibetan monastery",12.4256,75.9654
+"Kushalnagar","🏙️ Town",12.4604,75.9569
+"Cauvery Nisargadhama","🌿 Nature / Island",12.4380,75.9340
+"Madikeri (Raja's Seat)","🌄 Viewpoint",12.4244,75.7382
+"Abbey Falls","💦 Waterfall",12.4353,75.7183
+"Talakaveri","🛕 River origin",12.3833,75.4900
+"Nagarhole National Park","🐅 Wildlife",12.0500,76.1500
+"Somnathpur (Keshava Temple)","🛕 Heritage temple",12.2767,76.8776
+"Talakadu","🛕 Temples / Sand dunes",12.1860,77.0260
+"Shivanasamudra Falls","💦 Waterfall",12.2955,77.1650
+"Chamundi Hills","🛕 Temple / Viewpoint",12.2724,76.6700
+"Surathkal Beach","🏖️ Beach",12.9910,74.7940
+"Udupi (Krishna Temple)","🛕 Temple",13.3409,74.7421
+"Malpe Beach","🏖️ Beach",13.3790,74.7040
+"St Mary's Island","🏝️ Island",13.3790,74.6760
+"Maravanthe Beach","🏖️ Beach",13.7140,74.6360
+"Kollur (Mookambika)","🛕 Temple",13.8630,74.8140
+"Murudeshwar","🛕 Temple / Beach",14.0940,74.4850
+"Jog Falls","💦 Waterfall",14.2290,74.8120
+"Gokarna","🏖️ Temple / Beach",14.5479,74.3188
+"Hindupur","🏙️ Town",13.8286,77.4910
+"Lepakshi Temple","🛕 Heritage temple",13.8035,77.6082
+"Penukonda Fort","🏰 Fort",14.0790,77.5970
+"Anantapur","🏙️ City",14.6819,77.6006
+"Gooty Fort","🏰 Fort",15.1230,77.6310
+"Kurnool","🏙️ City",15.8281,78.0373
+"Belum Caves","🕳️ Caves",15.1000,78.1100
+"Hosur","🏙️ Town",12.7409,77.8253
+"Krishnagiri","🏙️ Town",12.5186,78.2137
+"Vellore Fort","🏰 Fort",12.9202,79.1328
+"Kanchipuram (temples & silk)","🛕 Temple town",12.8342,79.7036
+"Mahabalipuram (Shore Temple)","🏛️ World Heritage",12.6169,80.1993
+"Pondicherry","🏖️ Beach / French quarter",11.9416,79.8083
+"Auroville","🧘 Spiritual / Township",12.0058,79.8105
+"Chidambaram (Nataraja Temple)","🛕 Temple",11.3993,79.6937
+"Thanjavur (Brihadisvara)","🏛️ World Heritage",10.7828,79.1318
+"Tiruchirappalli (Rockfort)","🛕 Rock fort temple",10.8277,78.6967
+"Madurai (Meenakshi)","🛕 Temple",9.9195,78.1193
+"Rameswaram","🛕 Temple / Island",9.2876,79.3129
+"Kanyakumari","🌅 Sunrise / Sunset point",8.0883,77.5385
+"Munnar tea gardens","🌿 Hill station",10.0889,77.0595
+"Thekkady (Periyar)","🐘 Wildlife",9.6000,77.1700
+"Alleppey backwaters","🛶 Backwaters",9.4981,76.3388
+"Kochi (Fort Kochi)","🏖️ Heritage / Beach",9.9658,76.2422
+"Thrissur (Vadakkunnathan)","🛕 Temple",10.5276,76.2144
+"Lonavala","⛰️ Hill station",18.7557,73.4091
+"Karla Caves","🕳️ Buddhist caves",18.7836,73.4725
+"Lohagad Fort","🏰 Fort",18.7110,73.4770
+"Pune (Shaniwar Wada)","🏰 Heritage",18.5195,73.8553
+"Mahabaleshwar","🌄 Hill station",17.9237,73.6586
+"Kolhapur (Mahalaxmi)","🛕 Temple",16.7050,74.2433
+"Nashik","🛕 Temple city",19.9975,73.7898
+"Aurangabad (Ajanta-Ellora)","🕳️ Cave temples",19.8762,75.3433
+"Lonar Lake","🌊 Crater lake",19.9760,76.5080
+"Hyderabad (Charminar)","🕌 Monument",17.3616,78.4747
+"Golconda Fort","🏰 Fort",17.3833,78.4011
+"Warangal Fort","🏰 Fort",17.9689,79.5941
+"Mathura","🛕 Temple town",27.4924,77.6737
+"Vrindavan","🛕 Temple town",27.5800,77.7000
+"Fatehpur Sikri","🏰 World Heritage",27.0940,77.6679
+"Agra (Taj Mahal)","🕌 World Wonder",27.1751,78.0421
+"Jaipur (Amber Fort)","🏰 Fort",26.9855,75.8513
+"Neemrana Fort","🏰 Heritage hotel",27.9879,76.3880
+"Panipat","🏙️ Historic town",29.3909,76.9635
+"Kurukshetra","🛕 Mahabharata site",29.9695,76.8783
+"Chandigarh (Rock Garden)","🌿 Garden",30.7525,76.8101
+"Rishikesh","🧘 Yoga / Rafting",30.0869,78.2676
+"Haridwar","🛕 Ganga Aarti",29.9457,78.1642
+"Varanasi","🛕 Ghats / Temples",25.3176,82.9739
+"Sarnath","🛕 Buddhist site",25.3811,83.0214
+"Ujjain (Mahakaleshwar)","🛕 Temple",23.1828,75.7682
+"Udaipur (City Palace)","🏰 Palace / Lake",24.5764,73.6835
+"Chittorgarh Fort","🏰 Fort",24.8879,74.6454
+"Pushkar","🛕 Lake / Temple",26.4900,74.5513
+"Ranthambore","🐅 Wildlife",26.0173,76.5026
+"Gandhinagar (Akshardham)","🛕 Temple",23.2300,72.6740
+"Somnath","🛕 Temple",20.8880,70.4010
+"Konark Sun Temple","🏛️ World Heritage",19.8876,86.0945
+"Puri (Jagannath)","🛕 Temple / Beach",19.8135,85.8312
+"Bhubaneswar","🛕 Temple city",20.2961,85.8245
+"""
+
+
+def load_route_stops():
+    """Famous places people stop at on the road: name, kind, latitude, longitude."""
+    import io as _io
+    import pandas as _pd
+    return _pd.read_csv(_io.StringIO(_ROUTE_STOPS_CSV))
