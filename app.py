@@ -42,7 +42,6 @@ from svc_map_service import (
     lookup_coordinates, get_route, estimate_travel_options, extract_stops,
     format_hours, DAY_COLORS, find_places_along_route,
     suggest_places, build_india_map, TIER_HEX,
-    google_maps_link, per_person_costs, _label as route_label,
 )
 from svc_budget_service import apply_budget_split, calculate_budget, make_donut_chart
 from util_validators import validate_trip_form, validate_budget_inputs
@@ -377,31 +376,10 @@ def _render_map_dashboard(origin: str, destination: str, trip: dict = None, heig
     with st.spinner("Finding the best route..."):
         route = get_route(o, d)
 
-    # Choose between alternative routes (like Google Maps)
-    alts = route.get("all") or []
-    if len(alts) > 1:
-        labels = [route_label(r) for r in alts]
-        pick = st.radio("🛣️ Choose a route", labels, index=0,
-                        key=f"route_pick_{origin}|{destination}".lower())
-        chosen = alts[labels.index(pick)]
-        route = dict(route)
-        route.update({k: chosen[k] for k in ("path", "distance_km", "duration_min", "steps", "via")})
-        # keep the chosen route first so the others are drawn grey
-        route["all"] = [chosen] + [r for r in alts if r is not chosen]
-
     km, mins = route["distance_km"], route["duration_min"]
     no_road = route.get("no_road", False)
-
-    tcol1, tcol2 = st.columns([1, 2])
-    with tcol1:
-        travelers = int(st.number_input("👥 Travellers", min_value=1, max_value=20, value=1, step=1,
-                                        key="map_travelers"))
-    with tcol2:
-        st.write("")
-        st.link_button("🗺️ Open this route in Google Maps", google_maps_link(o, d))
-
-    options = per_person_costs(estimate_travel_options(km, mins, road_available=not no_road), travelers)
-    cheapest = min(options, key=lambda x: x["pp_low"])
+    options = estimate_travel_options(km, mins, road_available=not no_road)
+    cheapest = min(options, key=lambda x: x["low"])
 
     m1, m2, m3 = st.columns(3)
     if no_road:
@@ -410,17 +388,15 @@ def _render_map_dashboard(origin: str, destination: str, trip: dict = None, heig
     else:
         m1.metric("📏 Distance by road" if route["is_road"] else "📏 Distance (estimate)", f"{km:,.0f} km")
         m2.metric("🚗 Drive time" if route["is_road"] else "🚗 Drive time (estimate)", format_hours(mins / 60))
-    m3.metric("💰 Cheapest (per person)", f"{cheapest['icon']} ₹{cheapest['pp_low']:,}–{cheapest['pp_high']:,}")
+    m3.metric("💰 Cheapest way", f"{cheapest['icon']} ₹{cheapest['low']:,}–{cheapest['high']:,}")
 
     if no_road:
         st.warning("There is no road connection between these two places (islands or overseas), so the distance "
                    "is a straight line. You will need a flight or a ship.")
     elif not route["is_road"]:
         st.caption("⚠️ The live road-routing service is busy, so distance and time are estimates. Try again in a minute.")
-    elif route.get("source") == "google":
-        st.caption("Distance and drive time from Google Maps (live traffic).")
     else:
-        st.caption("Real road distance from OpenStreetMap. Drive time includes typical traffic (about 30% more than free-flow).")
+        st.caption("Distance is the real road distance. Drive time includes typical traffic (about 30% more than free-flow).")
 
     show_places = st.checkbox("📸 Show famous places on the way", value=True,
                               key=f"show_places_{origin}|{destination}|{'trip' if trip else 'page'}".lower())
@@ -482,26 +458,16 @@ def _render_map_dashboard(origin: str, destination: str, trip: dict = None, heig
     cols = st.columns(len(options))
     for col, opt in zip(cols, options):
         with col:
-            vehicle_line = (
-                f'<div style="color:#64748b;font-size:0.74rem;">{opt["vehicles"]} vehicle(s): '
-                f'₹{opt["total_low"]:,}–{opt["total_high"]:,} total</div>' if opt.get("vehicles") else "")
             st.markdown(f"""
 <div class="tm-card" style="padding:14px 14px; text-align:center;">
   <div style="font-size:1.6rem;">{opt['icon']}</div>
   <div style="font-weight:700;color:#1e293b;font-size:0.82rem;margin:4px 0;">{opt['mode']}</div>
-  <div style="font-weight:700;color:#2563eb;">₹{opt['pp_low']:,}–{opt['pp_high']:,} <span style="font-weight:400;font-size:0.72rem;">per person</span></div>
-  {vehicle_line}
+  <div style="font-weight:700;color:#2563eb;">₹{opt['low']:,}–{opt['high']:,}</div>
   <div style="color:#64748b;font-size:0.78rem;">about {format_hours(opt['hours'])}</div>
   <div style="color:#94a3b8;font-size:0.72rem;margin-top:4px;">{opt['note']}</div>
 </div>
 """, unsafe_allow_html=True)
-    st.caption("Approximate one-way fares for your group. Cab, car and bike cost is shared between people. Tolls, food and stays are extra. Verify before booking.")
-
-    if route.get("steps"):
-        with st.expander("🧭 Turn-by-turn directions"):
-            for i, sp in enumerate(route["steps"], 1):
-                st.markdown(f"{i}. {sp['text']} &nbsp;<span style='color:#64748b'>({sp['km']:.1f} km)</span>",
-                            unsafe_allow_html=True)
+    st.caption("Rough per-person fares (cab and bike are per vehicle, one way). Verify before booking.")
 
     if stops:
         st.markdown('<div class="tm-section-header">📍 Your plan on the map</div>', unsafe_allow_html=True)
