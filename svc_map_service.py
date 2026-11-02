@@ -296,105 +296,33 @@ def suggest_places(query: str, limit: int = 6) -> list:
 # ─── Routing ──────────────────────────────────────────────────────────────────
 
 # OSRM gives free-flow driving time. Real Indian roads (traffic, ghats, towns) are slower,
-# so the time we show is OSRM x this factor. (Google's time already includes traffic.)
+# so the time we show is OSRM x this factor.
 TRAFFIC_FACTOR = 1.3
-
-_OSRM_URLS = [
-    "https://router.project-osrm.org/route/v1/driving",
-    "https://routing.openstreetmap.de/routed-car/route/v1/driving",
-]
-
-
-# ---- turn-by-turn text -------------------------------------------------------
-
-def _step_text(step: dict) -> str:
-    man = step.get("maneuver", {}) or {}
-    typ, mod = man.get("type", ""), man.get("modifier", "")
-    name, ref = step.get("name") or "", step.get("ref") or ""
-    road = f"{ref} ({name})" if ref and name and ref not in name else (name or ref)
-    on = f" on {road}" if road else ""
-    onto = f" onto {road}" if road else ""
-    if typ == "depart":
-        return f"Head {mod or 'ahead'}{on}"
-    if typ == "arrive":
-        return "Arrive at your destination"
-    if typ in ("roundabout", "rotary", "roundabout turn"):
-        ex = man.get("exit")
-        return f"At the roundabout take exit {ex}{onto}" if ex else f"Go through the roundabout{onto}"
-    if typ in ("turn", "end of road"):
-        if mod == "straight":
-            return f"Continue straight{on}"
-        return f"Turn {mod}{onto}".replace("  ", " ")
-    if typ == "fork":
-        return f"Keep {mod or 'ahead'} at the fork{onto}"
-    if typ == "off ramp":
-        return f"Take the exit{onto}"
-    if typ == "on ramp":
-        return f"Take the ramp{onto}"
-    if typ == "merge":
-        return f"Merge{onto}"
-    return f"Continue{on}"
-
-
-def _summarize_steps(steps: list, max_steps: int = 80) -> list:
-    """Readable directions: [{'text': 'Turn left onto NH 275', 'km': 12.3}, ...]."""
-    out = []
-    for i, st_ in enumerate(steps):
-        km = float(st_.get("distance", 0)) / 1000.0
-        typ = (st_.get("maneuver", {}) or {}).get("type", "")
-        if km < 0.3 and typ not in ("depart", "arrive") and i not in (0, len(steps) - 1):
-            continue
-        out.append({"text": _step_text(st_), "km": km})
-    return out[:max_steps]
-
-
-def _via_road(steps: list) -> str:
-    """Name of the road the route follows for the most kilometres."""
-    by_road = {}
-    for st_ in steps:
-        r = st_.get("ref") or st_.get("name") or ""
-        if r:
-            by_road[r] = by_road.get(r, 0.0) + float(st_.get("distance", 0))
-    return max(by_road, key=by_road.get) if by_road else ""
-
-
-def _parse_osrm_routes(data: dict) -> list:
-    out = []
-    for r in data.get("routes", []):
-        steps = [s for leg in r.get("legs", []) for s in leg.get("steps", [])]
-        out.append({
-            "path": [(lat, lon) for lon, lat in r["geometry"]["coordinates"]],
-            "distance_km": r["distance"] / 1000.0,
-            "duration_min": r["duration"] / 60.0,
-            "steps": _summarize_steps(steps),
-            "via": _via_road(steps),
-        })
-    return out
 
 
 @st.cache_data(ttl=86400, show_spinner=False)
 def _osrm_route_cached(o_lat, o_lon, d_lat, d_lon):
-    """
-    Road routes (best + alternatives) from OSRM, trying two public servers.
-    Raises when no server answered, so failures are NOT cached.
-    """
-    for base in _OSRM_URLS:
+    """Road route from OSRM. Raises on any failure so errors are NOT cached."""
+    url = (f"https://router.project-osrm.org/route/v1/driving/"
+           f"{o_lon},{o_lat};{d_lon},{d_lat}")
+    resp = requests.get(url, params={"overview": "full", "geometries": "geojson"},
+                        headers=_HEADERS, timeout=_TIMEOUT)
+    if resp.status_code != 200:
+        # 400 with NoRoute = genuinely no road between the points (cache that answer)
         try:
-            resp = requests.get(f"{base}/{o_lon},{o_lat};{d_lon},{d_lat}",
-                                params={"overview": "full", "geometries": "geojson",
-                                        "alternatives": "true", "steps": "true"},
-                                headers=_HEADERS, timeout=_TIMEOUT + 4)
-            try:
-                data = resp.json()
-            except Exception:
-                continue
-            if data.get("code") == "NoRoute":
+            if resp.json().get("code") == "NoRoute":
                 return {"no_route": True}
-            if resp.status_code == 200 and data.get("routes"):
-                return {"routes": _parse_osrm_routes(data)}
         except Exception:
-            continue
-    raise RuntimeError("routing service unavailable")
+            pass
+        raise RuntimeError("routing service unavailable")
+    data = resp.json()
+    if data.get("code") == "NoRoute" or not data.get("routes"):
+        return {"no_route": True}
+    route = data["routes"][0]
+    path = [(lat, lon) for lon, lat in route["geometry"]["coordinates"]]
+    return {"path": path,
+            "distance_km": route["distance"] / 1000.0,
+            "duration_min": route["duration"] / 60.0}
 
 
 def _osrm_route(o_lat, o_lon, d_lat, d_lon):
@@ -404,132 +332,37 @@ def _osrm_route(o_lat, o_lon, d_lat, d_lon):
         return None
 
 
-# ---- optional: real Google Maps data (needs a Google Maps Platform API key) ---
-
-def _google_key() -> str:
-    try:
-        v = st.secrets.get("GOOGLE_MAPS_API_KEY", "")
-        if v:
-            return str(v)
-    except Exception:
-        pass
-    import os
-    return os.getenv("GOOGLE_MAPS_API_KEY", "")
-
-
-def _decode_polyline(encoded: str) -> list:
-    """Decode a Google encoded polyline into [(lat, lon), ...]."""
-    pts, index, lat, lng = [], 0, 0, 0
-    while index < len(encoded):
-        for is_lat in (True, False):
-            shift = result = 0
-            while True:
-                b = ord(encoded[index]) - 63
-                index += 1
-                result |= (b & 0x1F) << shift
-                shift += 5
-                if b < 0x20:
-                    break
-            delta = ~(result >> 1) if result & 1 else result >> 1
-            if is_lat:
-                lat += delta
-            else:
-                lng += delta
-        pts.append((lat / 1e5, lng / 1e5))
-    return pts
-
-
-@st.cache_data(ttl=3600, show_spinner=False)
-def _google_route_cached(o_lat, o_lon, d_lat, d_lon, key: str):
-    """Google Routes API (traffic-aware). Raises on any failure so it is NOT cached."""
-    body = {
-        "origin": {"location": {"latLng": {"latitude": o_lat, "longitude": o_lon}}},
-        "destination": {"location": {"latLng": {"latitude": d_lat, "longitude": d_lon}}},
-        "travelMode": "DRIVE", "routingPreference": "TRAFFIC_AWARE",
-        "computeAlternativeRoutes": True, "units": "METRIC", "languageCode": "en-IN",
-    }
-    resp = requests.post(
-        "https://routes.googleapis.com/directions/v2:computeRoutes", json=body, timeout=_TIMEOUT + 4,
-        headers={"X-Goog-Api-Key": key, "Content-Type": "application/json",
-                 "X-Goog-FieldMask": "routes.duration,routes.distanceMeters,routes.polyline.encodedPolyline,routes.description"})
-    if resp.status_code != 200:
-        raise RuntimeError("google routes unavailable")
-    routes = resp.json().get("routes", [])
-    if not routes:
-        raise RuntimeError("google found no route")
-    out = []
-    for r in routes:
-        out.append({
-            "path": _decode_polyline(r["polyline"]["encodedPolyline"]),
-            "distance_km": r["distanceMeters"] / 1000.0,
-            "duration_min": float(str(r["duration"]).rstrip("s")) / 60.0,
-            "steps": [], "via": r.get("description", ""),
-        })
-    return out
-
-
-def _google_route(o, d):
-    key = _google_key()
-    if not key:
-        return None
-    try:
-        return list(_google_route_cached(o[0], o[1], d[0], d[1], key))
-    except Exception:
-        return None
-
-
-def google_maps_link(o, d) -> str:
-    """Link that opens this exact trip in Google Maps (works for everyone, no key needed)."""
-    return (f"https://www.google.com/maps/dir/?api=1&origin={o[0]:.5f},{o[1]:.5f}"
-            f"&destination={d[0]:.5f},{d[1]:.5f}&travelmode=driving")
-
-
-# ---- main entry --------------------------------------------------------------
-
-def _label(r: dict) -> str:
-    via = f"via {r['via']} - " if r.get("via") else ""
-    return f"{via}{r['distance_km']:,.0f} km - {format_hours(r['duration_min'] / 60)}"
-
-
 def get_route(origin_coords, dest_coords) -> dict:
     """
     Route between two points. Always returns a dict with:
-      path, distance_km, duration_min, steps, via   (the best route)
-      all        : list of every route found (best first) - alternatives like Google Maps
-      source     : "google" | "osm" | "estimate"
-      is_road    : real road route?      no_road: no road link exists (islands / overseas)
-    Time from OpenStreetMap includes typical traffic (x1.3). Google's time already does.
-    If routing services are unreachable: straight-line x 1.25 as an estimate.
+      path, distance_km, duration_min, is_road (real road route?), no_road (no road link exists)
+    - Real road route from OSRM when available (time includes typical traffic).
+    - no_road=True for islands / overseas places that cannot be reached by road.
+    - If the routing service is simply unreachable: straight-line x 1.25 as an estimate.
     """
     straight = haversine_km(origin_coords, dest_coords)
+    road = _osrm_route(origin_coords[0], origin_coords[1], dest_coords[0], dest_coords[1])
 
-    routes, source = _google_route(origin_coords, dest_coords), "google"
-    if not routes:
-        osrm = _osrm_route(origin_coords[0], origin_coords[1], dest_coords[0], dest_coords[1])
-        if osrm and (osrm.get("no_route") or osrm["routes"][0]["distance_km"] > straight * 2.5 + 80):
-            return {"path": [origin_coords, dest_coords], "distance_km": straight, "steps": [], "via": "",
-                    "duration_min": straight / 700.0 * 60.0 + 120.0, "is_road": False, "no_road": True,
-                    "source": "estimate", "all": []}
-        if osrm:
-            routes, source = osrm["routes"], "osm"
-            for r in routes:
-                r["duration_min"] *= TRAFFIC_FACTOR
-    if routes:
-        best = dict(routes[0])
-        best.update({"is_road": True, "no_road": False, "source": source, "all": routes})
-        return best
-
+    # An absurdly long "road" for a short hop means OSRM snapped to a far-away road
+    # (e.g. destination on an island) - treat as no road connection.
+    if road and (road.get("no_route") or road["distance_km"] > straight * 2.5 + 80):
+        return {"path": [origin_coords, dest_coords], "distance_km": straight,
+                "duration_min": straight / 700.0 * 60.0 + 120.0, "is_road": False, "no_road": True}
+    if road:
+        road["duration_min"] = road["duration_min"] * TRAFFIC_FACTOR
+        road["is_road"] = True
+        road["no_road"] = False
+        return road
     est_km = straight * 1.25
-    return {"path": [origin_coords, dest_coords], "distance_km": est_km, "steps": [], "via": "",
-            "duration_min": est_km / 40.0 * 60.0, "is_road": False, "no_road": False,
-            "source": "estimate", "all": []}
+    return {"path": [origin_coords, dest_coords], "distance_km": est_km,
+            "duration_min": est_km / 40.0 * 60.0, "is_road": False, "no_road": False}
 
 
 def estimate_travel_options(distance_km: float, road_minutes: float, road_available: bool = True) -> list:
     """
-    Rough cost / time for each way of travelling (typical Indian prices).
-    Always estimates. Items with "seats" are per VEHICLE (cab, car, bike): use per_person_costs().
-    Returns a list of dicts: mode, icon, low, high, hours, note, seats (optional).
+    Rough student-budget estimates for each way of travelling (typical Indian fares).
+    All values are approximate and shown to the user as estimates.
+    Returns a list of dicts: mode, icon, low, high, hours, note.
     """
     d = max(distance_km, 1.0)
     flight = {"mode": "Flight", "icon": "✈️", "low": 2500, "high": 7000,
@@ -541,39 +374,16 @@ def estimate_travel_options(distance_km: float, road_minutes: float, road_availa
          "hours": d / 45.0, "note": "Cheapest on most routes"},
         {"mode": "Train (2S / sleeper)", "icon": "🚆", "low": max(50, d * 0.4), "high": max(100, d * 1.1),
          "hours": d / 55.0 + 0.3, "note": "Book on IRCTC in advance"},
-        {"mode": "Cab (one way)", "icon": "🚕", "low": d * 12.0, "high": d * 18.0, "seats": 4,
-         "hours": road_minutes / 60.0, "note": "Split by up to 4 people. Tolls extra"},
-        {"mode": "Own car (fuel)", "icon": "🚗", "low": d * 6.0, "high": d * 8.0, "seats": 4,
-         "hours": road_minutes / 60.0, "note": "Petrol only. Tolls extra"},
-        {"mode": "Bike (fuel only)", "icon": "🏍️", "low": d * 2.0, "high": d * 3.0, "seats": 2,
-         "hours": road_minutes / 60.0 * 1.1, "note": "2 riders per bike"},
+        {"mode": "Cab (one way)", "icon": "🚕", "low": d * 12.0, "high": d * 18.0,
+         "hours": road_minutes / 60.0, "note": "Whole cab - split among friends"},
+        {"mode": "Bike (fuel only)", "icon": "🏍️", "low": d * 2.0, "high": d * 3.0,
+         "hours": road_minutes / 60.0 * 1.1, "note": "Per bike, one way"},
     ]
     for o in options:
         o["low"], o["high"] = int(round(o["low"], -1)), int(round(o["high"], -1))
     if distance_km > 600:
         options.append(flight)
     return options
-
-
-def per_person_costs(options: list, travelers: int) -> list:
-    """
-    Add per-person numbers: pp_low / pp_high, plus total_low / total_high for vehicles.
-    Vehicles are shared: 5 people in cars of 4 seats need 2 cars.
-    """
-    travelers = max(1, int(travelers))
-    out = []
-    for o in options:
-        o = dict(o)
-        if o.get("seats"):
-            vehicles = -(-travelers // o["seats"])           # ceiling division
-            o["total_low"], o["total_high"] = o["low"] * vehicles, o["high"] * vehicles
-            o["vehicles"] = vehicles
-            o["pp_low"] = int(round(o["total_low"] / travelers, -1))
-            o["pp_high"] = int(round(o["total_high"] / travelers, -1))
-        else:
-            o["pp_low"], o["pp_high"] = o["low"], o["high"]
-        out.append(o)
-    return out
 
 
 def format_hours(hours: float) -> str:
@@ -833,25 +643,6 @@ def _numbered_icon(number, color):
     )
 
 
-def _add_map_extras(m):
-    """Satellite / street layers, layer switcher and a fullscreen button (all free map tiles)."""
-    try:
-        folium.TileLayer(
-            "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
-            attr="Tiles &copy; Esri", name="Satellite", control=True).add_to(m)
-        folium.TileLayer(
-            "https://server.arcgisonline.com/ArcGIS/rest/services/World_Street_Map/MapServer/tile/{z}/{y}/{x}",
-            attr="Tiles &copy; Esri", name="Streets (Esri)", control=True).add_to(m)
-        folium.LayerControl(collapsed=True, position="topright").add_to(m)
-    except Exception:
-        pass
-    try:
-        from folium.plugins import Fullscreen
-        Fullscreen(position="topleft").add_to(m)
-    except Exception:
-        pass
-
-
 def build_trip_map(origin: str, destination: str, stops: list = None, route: dict = None,
                    origin_coords=None, dest_coords=None, places: list = None):
     """
@@ -867,12 +658,6 @@ def build_trip_map(origin: str, destination: str, stops: list = None, route: dic
     dest_coords = dest_coords or get_coordinates(destination)
 
     m = folium.Map(location=dest_coords, zoom_start=8, tiles="OpenStreetMap")
-
-    # Alternative routes (grey), like Google Maps
-    for alt in ((route or {}).get("all") or [])[1:3]:
-        if route and alt.get("path") is not route.get("path"):
-            folium.PolyLine(alt["path"], color="#94a3b8", weight=5, opacity=0.8,
-                            tooltip=f"Alternative: {alt['distance_km']:.0f} km").add_to(m)
 
     # Route line
     if route:
@@ -922,10 +707,6 @@ def build_trip_map(origin: str, destination: str, stops: list = None, route: dic
         ).add_to(m)
         points.append((pl["lat"], pl["lon"]))
 
-    if route and route.get("path"):
-        points += _simplify_path(route["path"], 25)
-
-    _add_map_extras(m)
     # Zoom so everything is visible
     lats = [p[0] for p in points]
     lons = [p[1] for p in points]
@@ -979,7 +760,6 @@ def build_india_map(places_df):
         return None, False
 
     m = folium.Map(location=[22.5, 79.0], zoom_start=5, tiles="OpenStreetMap")
-    _add_map_extras(m)
     try:
         from folium.plugins import MarkerCluster
         layer = MarkerCluster(disable_clustering_at_zoom=8).add_to(m)
