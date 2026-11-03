@@ -209,6 +209,28 @@ Bodh Gaya,Bihar,Spiritual,1200,3000,Mahabodhi Temple (UNESCO),24.6961,84.9869,
 Port Blair,Andaman and Nicobar,Beach & Islands,10000,20000,"Cellular Jail, Ross Island",11.6234,92.7265,Andaman
 Havelock Island,Andaman and Nicobar,Beach & Islands,14000,35000,"Radhanagar Beach, scuba diving",11.974,92.985,Swaraj Dweep
 Lakshadweep,Lakshadweep,Luxury Stay,25000,60000,Coral lagoons and Agatti island,10.85,72.1833,Agatti
+Lalitha Mahal Palace (Mysuru),Karnataka,Luxury Stay,9000,22000,"Palace hotel facing Chamundi Hills",12.2950,76.6890,Lalitha Mahal
+Evolve Back Hampi,Karnataka,Luxury Stay,15000,35000,"Luxury resort near Hampi ruins",15.3153,76.4747,Kamalapura Palace
+Coorg Plantation Resorts,Karnataka,Nature & Hills,12000,28000,"Luxury coffee-estate resorts and spa",12.3375,75.8069,Coorg Luxury
+Kabini Luxury Safari,Karnataka,Wildlife & Adventure,10000,25000,"Jungle lodges and boat safaris",11.9930,76.3030,Kabini
+The Leela Palace Bengaluru,Karnataka,Luxury Stay,12000,30000,"5-star palace-style hotel",12.9605,77.6485,Leela Bengaluru
+Taj West End Bengaluru,Karnataka,Luxury Stay,11000,28000,"Heritage hotel in 20 acres of gardens",12.9840,77.5830,Taj West End
+Oberoi Udaivilas,Rajasthan,Luxury Stay,30000,70000,"Palace hotel on Lake Pichola",24.5654,73.6785,Udaivilas
+Suryagarh Jaisalmer,Rajasthan,Luxury Stay,18000,45000,"Desert fort-style luxury stay",26.9157,70.9083,Jaisalmer Luxury
+Ranthambore Luxury Camps,Rajasthan,Wildlife & Adventure,12000,40000,"Tiger safari with luxury tents",26.0173,76.5026,Aman-i-Khas
+Oberoi Amarvilas Agra,Uttar Pradesh,Luxury Stay,25000,60000,"Rooms with Taj Mahal views",27.1670,78.0560,Amarvilas
+Brijrama Palace Varanasi,Uttar Pradesh,Luxury Stay,12000,30000,"Ganga ghat palace hotel",25.3010,83.0090,Brijrama
+Taj Mahal Palace Mumbai,Maharashtra,Luxury Stay,18000,45000,"Iconic harbour hotel by Gateway of India",18.9217,72.8332,Taj Mumbai
+Taj Mahal Hotel New Delhi,Delhi,Luxury Stay,15000,40000,"Luxury hotel in Lutyens Delhi",28.6040,77.2250,Taj Delhi
+Oberoi Grand Kolkata,West Bengal,Luxury Stay,10000,25000,"Colonial-era grand hotel",22.5614,88.3510,Oberoi Grand
+Taj Coromandel Chennai,Tamil Nadu,Luxury Stay,10000,25000,"5-star hotel in Nungambakkam",13.0620,80.2500,Taj Coromandel
+Goa Luxury Beach Resorts,Goa,Beach & Islands,10000,35000,"5-star beach resorts and spas",15.2993,74.1240,South Goa Resorts
+Munnar Luxury Resorts,Kerala,Nature & Hills,8000,22000,"Tea-estate resorts with valley views",10.0889,77.0595,Munnar Resorts
+Alleppey Luxury Houseboat,Kerala,Luxury Stay,9000,25000,"Private luxury houseboat on the backwaters",9.4981,76.3388,Alappuzha Houseboat
+Wildflower Hall Shimla,Himachal Pradesh,Luxury Stay,15000,35000,"Himalayan luxury resort in the cedar forest",31.1130,77.2230,Wildflower Hall
+Darjeeling Tea Estate Stay,West Bengal,Nature & Hills,8000,18000,"Heritage tea-estate bungalows",27.0410,88.2663,Darjeeling Luxury
+Ananda in the Himalayas,Uttarakhand,Luxury Stay,15000,40000,"Luxury spa and wellness palace estate",30.1750,78.2980,Ananda Spa
+Jim Corbett Luxury Lodges,Uttarakhand,Wildlife & Adventure,9000,25000,"Riverside jungle lodges",29.5300,78.7747,Corbett Luxury
 """
 
 
