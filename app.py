@@ -781,19 +781,58 @@ def _render_india_explorer(o_name: str, o_coords):
         return
     st.caption("Per-person estimates for a 2-3 day trip (stay, food, local travel, entry). Verify before booking.")
 
-    c1, c2, c3 = st.columns(3)
-    with c1:
-        sel_tiers = st.multiselect("💰 Budget level", TIERS, default=TIERS, key="ie_tiers",
-                                   help="Cheap: under ₹2,500 · Mid-range: ₹2,500-7,999 · Royal / Luxury: ₹8,000+")
-    cats = sorted(df["category"].unique())
-    with c2:
-        sel_cats = st.multiselect("🏷️ Type", cats, default=cats, key="ie_cats")
-    with c3:
-        sel_states = st.multiselect("📍 State (optional)", sorted(df["state"].unique()), key="ie_states")
+    def _reset_filters():
+        for k in ("ie_tier", "ie_cat", "ie_state"):
+            st.session_state[k] = "All"
 
-    f = df[df["tier"].isin(sel_tiers) & df["category"].isin(sel_cats)]
-    if sel_states:
-        f = f[f["state"].isin(sel_states)]
+    # Smart filters: each box only offers choices that really have places, with counts.
+    ALL = "All"
+    for k in ("ie_tier", "ie_cat", "ie_state"):
+        st.session_state.setdefault(k, ALL)
+
+    def _val(key):
+        v = st.session_state.get(key, ALL)
+        return v.split("  (")[0] if v else ALL
+
+    def _subset(skip):
+        d = df
+        if skip != "tier" and _val("ie_tier") != ALL:
+            d = d[d["tier"] == _val("ie_tier")]
+        if skip != "cat" and _val("ie_cat") != ALL:
+            d = d[d["category"] == _val("ie_cat")]
+        if skip != "state" and _val("ie_state") != ALL:
+            d = d[d["state"] == _val("ie_state")]
+        return d
+
+    def _options(col, skip, order=None):
+        d = _subset(skip)
+        counts = d[col].value_counts()
+        names = [n for n in (order or sorted(counts.index)) if n in counts.index]
+        return [ALL] + [f"{n}  ({int(counts[n])})" for n in names]
+
+    def _fix(key, options):
+        # if the saved choice is no longer possible, go back to "All"
+        names = [o.split("  (")[0] for o in options]
+        cur = _val(key)
+        st.session_state[key] = options[names.index(cur)] if cur in names else ALL
+
+    o_tier, o_cat, o_state = _options("tier", "tier", TIERS), _options("category", "cat"), _options("state", "state")
+    _fix("ie_tier", o_tier); _fix("ie_cat", o_cat); _fix("ie_state", o_state)
+
+    c1, c2, c3, c4 = st.columns([3, 3, 3, 1.4])
+    with c1:
+        st.selectbox("💰 Budget level", o_tier, key="ie_tier",
+                     help="Cheap: under ₹2,500 · Mid-range: ₹2,500-7,999 · Royal / Luxury: ₹8,000+ (per person, 2-3 days)")
+    with c2:
+        st.selectbox("🏷️ Type", o_cat, key="ie_cat")
+    with c3:
+        st.selectbox("📍 State", o_state, key="ie_state")
+    with c4:
+        st.write("")
+        st.write("")
+        st.button("🔄 Reset", key="ie_reset", use_container_width=True, on_click=_reset_filters)
+
+    f = _subset(None)
     f = f.sort_values(["budget_min", "place"]).reset_index(drop=True)
 
     legend = " &nbsp;&nbsp; ".join(
@@ -802,8 +841,7 @@ def _render_india_explorer(o_name: str, o_coords):
                 unsafe_allow_html=True)
 
     if f.empty:
-        st.info("No places match ALL these filters together (e.g. Royal + Beach + Karnataka has none). "
-                "Remove one filter - try clearing the State or Type box.")
+        st.info("No places match this combination. Press 🔄 Reset, or set one box back to 'All'.")
         return
 
     fmap, ok = build_india_map(f)
