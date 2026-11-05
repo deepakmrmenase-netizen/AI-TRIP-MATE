@@ -59,7 +59,7 @@ def _get_model():
 
 # ─── Core AI Call ─────────────────────────────────────────────────────────────
 
-_GEMINI_MODELS = ["gemini-2.0-flash", "gemini-2.5-flash", "gemini-1.5-flash"]
+_GEMINI_MODELS = ["gemini-flash-latest", "gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash"]
 LAST_AI_ERROR = [""]          # short reason shown to the user when AI could not be used
 
 
@@ -794,9 +794,13 @@ def chat_with_ai(user_message: str, history: list = None) -> str:
                         "Use these numbers exactly; never invent distances or travel times:\n" + facts + "\n\n")
         context += f"User: {user_message}\nAssistant:"
 
-        return call_ai(context)
-    except Exception:
-        return get_demo_response(user_message, history)
+        answer = call_ai(context)
+        LAST_AI_ERROR[0] = ""
+        return answer
+    except Exception as exc:
+        LAST_AI_ERROR[0] = str(exc)[:160]
+        note = (f"⚠️ *The AI service could not be reached ({LAST_AI_ERROR[0]}), so this is TripMate's built-in answer.*\n\n")
+        return note + get_demo_response(user_message, history)
 
 
 # ─── Budget Optimisation AI ───────────────────────────────────────────────────
