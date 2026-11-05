@@ -222,8 +222,8 @@ def generate_trip_plan(trip_params: dict) -> dict:
         return _demo_trip(trip_params)
 
 
-def _nearby_spots(destination: str, radius_km: float = 45.0, want: int = 12) -> list:
-    """Real places around the destination from TripMate's own lists: [(name, note, km_away)]."""
+def _nearby_spots_geo(destination: str, radius_km: float = 45.0, want: int = 12) -> list:
+    """Real places around the destination from TripMate's own lists: [(name, note, straight_km, lat, lon)]."""
     try:
         from svc_map_service import lookup_coordinates, haversine_km
         from data_loader import load_india_places, load_route_stops
@@ -243,7 +243,7 @@ def _nearby_spots(destination: str, radius_km: float = 45.0, want: int = 12) -> 
                 for h in (hl or [str(r["place"])]):
                     if h[:1].islower() or len(h) < 5:      # skip generic words like "forests"
                         continue
-                    spots.append((h, f"Visit {h} ({r['category'].lower()})", km))
+                    spots.append((h, f"Visit {h} ({r['category'].lower()})", km, float(r["latitude"]), float(r["longitude"])))
     except Exception:
         pass
     try:
@@ -251,19 +251,24 @@ def _nearby_spots(destination: str, radius_km: float = 45.0, want: int = 12) -> 
             km = haversine_km(c, (float(r["latitude"]), float(r["longitude"])))
             if km <= radius_km:
                 kind = str(r["kind"]).split(" ", 1)[-1]
-                spots.append((str(r["name"]), f"Visit {r['name']} - {kind.lower()}", km))
+                spots.append((str(r["name"]), f"Visit {r['name']} - {kind.lower()}", km, float(r["latitude"]), float(r["longitude"])))
     except Exception:
         pass
     spots.sort(key=lambda s: s[2])
     out = []
-    for name, note, km in spots:
+    for name, note, km, la, lo in spots:
         key = name.lower()
         core = key.split(" (")[0].strip()
         if core in ("sunset point", "viewpoint") or any(
-                core in o.lower() or o.lower().split(" (")[0] in key for o, _, _ in out):
+                core in o[0].lower() or o[0].lower().split(" (")[0] in key for o in out):
             continue
-        out.append((name, note, km))
+        out.append((name, note, km, la, lo))
     return out[:want]
+
+
+def _nearby_spots(destination: str, radius_km: float = 45.0, want: int = 12) -> list:
+    """Real places around the destination: [(name, note, km_away)]."""
+    return [(n, note, km) for n, note, km, _, _ in _nearby_spots_geo(destination, radius_km, want)]
 
 
 def _demo_trip(trip_params: dict) -> dict:
@@ -370,6 +375,117 @@ DEMO_RESPONSES = {
 _STOP_WORDS = {"the", "a", "an", "my", "your", "this", "that", "india", "trip", "budget", "me", "us", "it", "there",
                "here", "weekend", "day", "days", "friends", "college", "students", "student", "winter", "summer"}
 
+_NAME_INDEX = {}
+
+
+def _name_index():
+    """name -> (display, (lat, lon), exact) from our own lists. exact=False for sights listed under a bigger place."""
+    if _NAME_INDEX:
+        return _NAME_INDEX
+    import re
+    clean = lambda s: re.sub(r"\s+", " ", re.sub(r"[^a-z0-9 ]+", " ", str(s).lower())).strip()
+    try:
+        from data_loader import load_india_places, load_route_stops
+        for r in load_india_places().itertuples():
+            c = (float(r.latitude), float(r.longitude))
+            for n in [str(r.place), str(r.place).split(" (")[0]] + [a for a in str(r.aliases).split(",") if a.strip()]:
+                _NAME_INDEX[clean(n)] = (str(r.place).split(" (")[0], c, True)
+        for r in load_route_stops().itertuples():
+            c = (float(r.latitude), float(r.longitude))
+            for n in (str(r.name), str(r.name).split(" (")[0]):
+                _NAME_INDEX.setdefault(clean(n), (str(r.name).split(" (")[0], c, True))
+        for r in load_india_places().itertuples():                  # sights listed under a bigger place
+            c = (float(r.latitude), float(r.longitude))
+            for h in str(r.highlight).split(","):
+                if clean(h) and clean(h) not in _NAME_INDEX:
+                    _NAME_INDEX[clean(h)] = (h.strip(), c, False)
+    except Exception:
+        pass
+    return _NAME_INDEX
+
+
+def _resolve_place(text: str):
+    """(display name, (lat, lon), approx?) for a typed place - our lists, live map search, spelling-tolerant."""
+    import re, difflib
+    text = re.sub(r"\b(the|distance|between|route|how|far|is|from|to|km|time|please|temple of)\b", " ", text, flags=re.I)
+    text = re.sub(r"[^A-Za-z0-9 .'-]+", " ", text).strip()
+    text = re.sub(r"\s+", " ", text)
+    if len(text) < 3:
+        return None
+    key = text.lower()
+    idx = _name_index()
+    hit = idx.get(key)
+    if hit and hit[2]:
+        return hit[0], hit[1], False
+    try:
+        from svc_map_service import lookup_coordinates
+        c = lookup_coordinates(text)
+    except Exception:
+        c = None
+    if c:
+        return text.title(), c, False
+    if hit:
+        return hit[0], hit[1], True
+    close = difflib.get_close_matches(key, list(idx.keys()), n=1, cutoff=0.72)
+    if close:
+        d, c, exact = idx[close[0]]
+        return d, c, not exact
+    return None
+
+
+def _extract_pair(msg: str):
+    import re
+    m = msg.strip().rstrip("?.! ")
+    pats = [
+        (r"how\s+far\s+(?:is\s+)?(.+?)\s+from\s+(.+)", True),
+        (r"distance\s+(?:between\s+)?(.+?)\s+(?:to|and)\s+(.+)", False),
+        (r"(?:route|way|drive|travel|go)\s+from\s+(.+?)\s+to\s+(.+)", False),
+        (r"from\s+(.+?)\s+to\s+(.+)", False),
+        (r"(.+?)\s+to\s+(.+?)\s+(?:distance|route|km|kms|how far|time|cost)\b.*", False),
+        (r"(.+?)\s+to\s+(.+?)\s*$", False),
+    ]
+    for p, swap in pats:
+        mm = re.search(p, m, re.I)
+        if mm:
+            a, b = mm.group(1), mm.group(2)
+            b = re.sub(r"\s+(distance|route|km|kms|by .*|how .*|what .*|cost.*|time.*)$", "", b, flags=re.I)
+            return (b, a) if swap else (a, b)
+    return None
+
+
+def _fmt_time(mins: float) -> str:
+    h, mn = divmod(int(round(mins)), 60)
+    return f"{h}h {mn:02d}m" if h else f"{mn} min"
+
+
+def _distance_answer(msg: str):
+    pair = _extract_pair(msg)
+    if not pair:
+        return None
+    a, b = _resolve_place(pair[0]), _resolve_place(pair[1])
+    if not a or not b:
+        missing = pair[0] if not a else pair[1]
+        return (f"I couldn't find **{missing.strip()}** on the map. Check the spelling or add the area, "
+                f"for example *Kudlu Falls, Karnataka*.")
+    from svc_map_service import get_route, estimate_travel_options, google_maps_link
+    r = get_route(a[1], b[1])
+    km, mins = r["distance_km"], r["duration_min"]
+    opts = estimate_travel_options(km, mins, road_available=not r.get("no_road", False))
+    src = {"google": "Google Maps", "osm": "OpenStreetMap road routing"}.get(r.get("source"), "estimate (routing service busy)")
+    lines = [f"🚗 **{a[0]} → {b[0]}**\n",
+             f"- **Road distance:** {km:,.1f} km" if r.get("is_road") else f"- **Distance (approx):** {km:,.0f} km",
+             f"- **Drive time:** about {_fmt_time(mins)} (with typical traffic)" if r.get("is_road") else f"- **Time (approx):** {_fmt_time(mins)}"]
+    if r.get("via"):
+        lines.append(f"- **Main road:** {r['via']}")
+    lines.append("\n**Approximate cost (one way):**")
+    for o in opts:
+        extra = " (whole vehicle, split between people)" if o.get("seats") else " per person"
+        lines.append(f"- {o['icon']} {o['mode']}: ₹{o['low']:,}-{o['high']:,}{extra}, about {_fmt_time(o['hours'] * 60)}")
+    if a[2] or b[2]:
+        lines.append("\n⚠️ One of these is listed as part of a bigger place, so its exact point may be a few km off.")
+    lines.append(f"\nSource: {src}. [Open in Google Maps]({google_maps_link(a[1], b[1])}) for live traffic, or use **Trip Map** for the full route and famous places on the way.")
+    return "\n".join(lines)
+
 
 def _find_place_in_message(msg: str):
     """Return ('dataset', row_dict) | ('state', name) | ('online', (name, (lat, lon))) | None."""
@@ -393,24 +509,18 @@ def _find_place_in_message(msg: str):
         if f" {s.lower()} " in low:
             return "state", s
     m = re.search(r"\b(?:in|to|at|near|around|visit|about|of|from)\s+([A-Za-z][A-Za-z .'-]{2,28}?)(?=\s+(?:for|from|with|please|trip|visit|in|and|how|what|is|are)\b|[?.!,]|$)", msg)
-    cands = [m.group(1).strip()] if m else []
-    for cand in cands:
+    for cand in ([m.group(1).strip()] if m else []):
         words = [w for w in cand.split() if w.lower() not in _STOP_WORDS]
         if not words:
             continue
-        name = " ".join(words)
-        try:
-            from svc_map_service import lookup_coordinates
-            c = lookup_coordinates(name)
-        except Exception:
-            c = None
-        if c:
-            return "online", (name.title(), c)
+        r = _resolve_place(" ".join(words))
+        if r:
+            return "online", (r[0], r[1])
     return None
 
 
 def _place_answer(msg: str):
-    """Real answer about a place or state from TripMate's own data + live map data. None if no place found."""
+    """Real answer about a place or state from TripMate's data + live map data (road distances). None if no place found."""
     found = _find_place_in_message(msg)
     if not found:
         return None
@@ -426,46 +536,71 @@ def _place_answer(msg: str):
         lines = [f"- **{r.place}** - {r.category}, ₹{int(r.budget_min):,}-{int(r.budget_max):,} per person ({r.highlight.split(',')[0].strip()})"
                  for r in sub.itertuples()]
         return (f"🗺️ **Places to visit in {val}** (cheapest first):\n\n" + "\n".join(lines) +
-                "\n\n💡 Open **Explore Destinations** to filter by budget, type and see them on a map, or ask me about any of these places.")
+                "\n\n💡 Open **Explore Destinations** to filter by budget and type, or ask me about any of these places.")
 
     if kind == "dataset":
         r = val
         name, center = str(r["place"]), (float(r["latitude"]), float(r["longitude"]))
         head = (f"📍 **{name}, {r['state']}** - {r['category']}\n\n"
                 f"**Known for:** {r['highlight']}\n\n**Estimated cost:** ₹{int(r['budget_min']):,}-{int(r['budget_max']):,} per person (2-3 days)")
-        label = name
     else:
         name, center = val
         head = f"📍 **{name}**"
-        label = name
 
+    from svc_map_service import road_distances, haversine_km, find_places_near, lookup_coordinates, get_route
     parts = [head]
     try:
-        spots = _nearby_spots(label, radius_km=40.0, want=12)
+        spots = _nearby_spots_geo(name, radius_km=45.0, want=12)
         if spots:
-            parts.append(f"**{len(spots)} places to visit around {label}:**\n" +
-                         "\n".join(f"{i}. {n}" + (f" - {km:.0f} km away" if km > 3 else "") for i, (n, _, km) in enumerate(spots, 1)))
+            rd = road_distances(center, [(la, lo) for _, _, _, la, lo in spots])
+            rows = []
+            for i, (n, _, skm, la, lo) in enumerate(spots):
+                if rd and rd[i][0] is not None and rd[i][0] < 2:
+                    rows.append((0.0, f"{i + 1}. {n} - in {name} itself"))
+                elif rd and rd[i][0] is not None:
+                    rows.append((rd[i][0], f"{i + 1}. {n} - about {rd[i][0]:.0f} km by road, {_fmt_time(rd[i][1])}"))
+                else:
+                    rows.append((skm * 1.35, f"{i + 1}. {n} - about {skm * 1.35:.0f} km by road (approx.)"))
+            rows.sort(key=lambda x: x[0])
+            parts.append(f"**{len(rows)} places to visit around {name}** (road distance from {name}):\n" +
+                         "\n".join(f"{j}. {txt.split('. ', 1)[1]}" for j, (_, txt) in enumerate(rows, 1)))
+            if not rd:
+                parts[-1] += "\n_Road-routing service is busy, so distances are estimates._"
     except Exception:
         pass
     try:
-        from svc_map_service import find_places_near
         near = find_places_near(center, radius_km=15.0, limit=10)
         if near:
-            parts.append("**🛕 Temples and local sights within 15 km (live map data):**\n" +
-                         "\n".join(f"- {p['name']} ({p['kind'].split(' ', 1)[1].lower()}) - {p['km_away']:.1f} km" for p in near))
+            rd2 = road_distances(center, [(p["lat"], p["lon"]) for p in near])
+            lines = []
+            for i, p in enumerate(near):
+                d = f"{rd2[i][0]:.1f} km by road" if rd2 and rd2[i][0] is not None else f"{p['km_away'] * 1.35:.1f} km (approx.)"
+                lines.append(f"- {p['name']} ({p['kind'].split(' ', 1)[1].lower()}) - {d}")
+            parts.append("**🛕 Temples and local sights nearby (live map data):**\n" + "\n".join(lines))
     except Exception:
         pass
     try:
-        from svc_map_service import haversine_km, lookup_coordinates
-        o = lookup_coordinates("Bengaluru")
-        km = haversine_km(o, center) * 1.25
-        if km > 5:
-            parts.append(f"**From Bengaluru:** about {km:,.0f} km by road. Bus roughly ₹{int(km * 1.0 / 10) * 10:,}-{int(km * 1.8 / 10) * 10:,}. "
-                         f"For the exact route, distance and famous places on the way, open **Trip Map**.")
+        r = get_route(lookup_coordinates("Bengaluru"), center)
+        if r.get("is_road") and r["distance_km"] > 5:
+            parts.append(f"**From Bengaluru:** {r['distance_km']:,.0f} km by road, about {_fmt_time(r['duration_min'])} drive. "
+                         f"Open **Trip Map** for the route, famous places on the way and fares.")
     except Exception:
         pass
-    parts.append("💡 Want a day-by-day plan? Open **AI Trip Planner** and enter this place as your destination.")
+    parts.append("💡 Ask me for the distance between any two places, for example *Kudlu Falls to Horanadu*, or open **AI Trip Planner** for a day-by-day plan.")
     return "\n\n".join(parts)
+
+
+def _facts_for(message: str):
+    """Map-based answer for place / distance questions (used directly in demo mode, as verified facts with real AI)."""
+    low = message.lower()
+    try:
+        if any(k in low for k in (" to ", "distance", "how far", "route from", "between")):
+            ans = _distance_answer(message)
+            if ans:
+                return ans
+        return _place_answer(message)
+    except Exception:
+        return None
 
 
 def get_demo_response(user_message: str) -> str:
@@ -473,10 +608,7 @@ def get_demo_response(user_message: str) -> str:
     msg = user_message.lower()
     generic = any(k in msg for k in ["pack", "packing", "save money", "money tip", "photography", "hostel"])
     if not generic:
-        try:
-            answer = _place_answer(user_message)
-        except Exception:
-            answer = None
+        answer = _facts_for(user_message)
         if answer:
             return answer
     if any(k in msg for k in ["mysuru", "mysore"]):
@@ -512,6 +644,10 @@ def chat_with_ai(user_message: str, history: list = None) -> str:
             for msg in history[-6:]:
                 role = "User" if msg["role"] == "user" else "Assistant"
                 context += f"{role}: {msg['content']}\n"
+        facts = _facts_for(user_message)
+        if facts:
+            context += ("VERIFIED MAP FACTS for this question (real road distances, times and nearby places from OpenStreetMap). "
+                        "Use these numbers exactly; never invent distances or travel times:\n" + facts + "\n\n")
         context += f"User: {user_message}\nAssistant:"
 
         return call_ai(context)
