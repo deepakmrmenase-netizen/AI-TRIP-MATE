@@ -4,12 +4,12 @@ AI Travel Assistant chat interface.
 """
 
 import streamlit as st
-from svc_ai_service import chat_with_ai, call_ai
+from svc_ai_service import chat_with_ai, chat_stream, call_ai
 from app_config import DEMO_MODE
 
 
 SUGGESTED_QUESTIONS = [
-    "What can I visit in Mysuru in 2 days?",
+    "What can I visit in Sringeri in 2 days?",
     "Suggest a trip under ₹3,000",
     "How can I save money while travelling?",
     "What should I pack for a weekend trip?",
@@ -66,19 +66,15 @@ def render_chatbot_page():
             '(real road distances, nearby temples, food, stays). For a free-talking AI, add <code>GEMINI_API_KEY</code> '
             'in <b>Manage app → Settings → Secrets</b>.</div>', unsafe_allow_html=True)
     else:
-        st.markdown(
-            '<div style="background:#dcfce7;border:1px solid #86efac;border-radius:10px;padding:10px 14px;margin-bottom:6px;'
-            'font-size:0.88rem;color:#14532d;">🟢 <b>Gemini AI connected</b> - answers use your API key plus live map facts.</div>',
-            unsafe_allow_html=True)
-        if st.button("🔧 Test my AI connection", key="ai_test_btn"):
-            with st.spinner("Testing..."):
-                try:
-                    reply = call_ai("Reply with exactly: OK")
-                    st.success(f"AI works. Reply: {reply.strip()[:60]}")
-                except Exception as exc:
-                    st.error(f"AI is NOT working: {str(exc)[:220]}")
-                    st.caption("Common reasons: wrong or expired key, key not allowed for Gemini, free quota finished. "
-                               "Create a new key at aistudio.google.com and paste it in Secrets as GEMINI_API_KEY = \"your-key\".")
+        st.caption("🟢 Gemini AI is on (your API key + live map facts)")
+        with st.expander("🔧 Test my AI connection"):
+            if st.button("Run test", key="ai_test_btn"):
+                with st.spinner("Testing..."):
+                    try:
+                        reply = call_ai("Reply with exactly: OK")
+                        st.success(f"AI works. Reply: {reply.strip()[:60]}")
+                    except Exception as exc:
+                        st.error(f"AI is NOT working: {str(exc)[:220]}")
 
     if DEMO_MODE:
         st.markdown("""
@@ -122,11 +118,17 @@ def render_chatbot_page():
 
 
 def _handle_message(user_message: str):
-    """Add user message, get AI response, update history."""
+    """Add the user message, stream the answer word by word, save both in the history."""
+    history_before = list(st.session_state.chat_history)
     st.session_state.chat_history.append({"role": "user", "content": user_message})
-    with st.spinner("🤖 Thinking..."):
+    with st.chat_message("user", avatar="🧑‍🎓"):
+        st.markdown(user_message)
+    with st.chat_message("assistant", avatar="🤖"):
         try:
-            response = chat_with_ai(user_message, st.session_state.chat_history[:-1])
+            response = st.write_stream(chat_stream(user_message, history_before))
+            if not isinstance(response, str):
+                response = str(response)
         except Exception:
             response = "Sorry, I encountered an error. Please try again."
+            st.markdown(response)
     st.session_state.chat_history.append({"role": "assistant", "content": response})
