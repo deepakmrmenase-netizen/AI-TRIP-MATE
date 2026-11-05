@@ -4,7 +4,7 @@ AI Travel Assistant chat interface.
 """
 
 import streamlit as st
-from svc_ai_service import chat_with_ai
+from svc_ai_service import chat_with_ai, call_ai
 from app_config import DEMO_MODE
 
 
@@ -57,6 +57,28 @@ def render_chatbot_page():
   </div>
 </div>
 """, unsafe_allow_html=True)
+
+    # Which brain is answering? (so it is never a mystery)
+    if DEMO_MODE:
+        st.markdown(
+            '<div style="background:#fef9c3;border:1px solid #fde047;border-radius:10px;padding:10px 14px;margin-bottom:14px;'
+            'font-size:0.88rem;color:#713f12;">🟡 <b>Built-in mode</b> - answers come from TripMate\'s own place data and live maps '
+            '(real road distances, nearby temples, food, stays). For a free-talking AI, add <code>GEMINI_API_KEY</code> '
+            'in <b>Manage app → Settings → Secrets</b>.</div>', unsafe_allow_html=True)
+    else:
+        st.markdown(
+            '<div style="background:#dcfce7;border:1px solid #86efac;border-radius:10px;padding:10px 14px;margin-bottom:6px;'
+            'font-size:0.88rem;color:#14532d;">🟢 <b>Gemini AI connected</b> - answers use your API key plus live map facts.</div>',
+            unsafe_allow_html=True)
+        if st.button("🔧 Test my AI connection", key="ai_test_btn"):
+            with st.spinner("Testing..."):
+                try:
+                    reply = call_ai("Reply with exactly: OK")
+                    st.success(f"AI works. Reply: {reply.strip()[:60]}")
+                except Exception as exc:
+                    st.error(f"AI is NOT working: {str(exc)[:220]}")
+                    st.caption("Common reasons: wrong or expired key, key not allowed for Gemini, free quota finished. "
+                               "Create a new key at aistudio.google.com and paste it in Secrets as GEMINI_API_KEY = \"your-key\".")
 
     if DEMO_MODE:
         st.markdown("""
