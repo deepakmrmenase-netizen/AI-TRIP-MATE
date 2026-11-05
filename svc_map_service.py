@@ -913,6 +913,87 @@ def find_places_near(center, radius_km: float = 15.0, limit: int = 15) -> list:
     return kept
 
 
+# ─── Food, stays and services around a place ────────────────────────────────
+
+_SERVICE_FILTERS = {
+    "food": ['["amenity"~"^(restaurant|cafe|fast_food|food_court)$"]'],
+    "stay": ['["tourism"~"^(hotel|guest_house|hostel|motel|apartment|chalet)$"]'],
+    "medical": ['["amenity"~"^(hospital|clinic|pharmacy|doctors)$"]'],
+    "fuel": ['["amenity"="fuel"]'],
+    "atm": ['["amenity"~"^(atm|bank)$"]'],
+}
+_SERVICE_LABEL = {"food": "🍽️ Eatery", "stay": "🏨 Stay", "medical": "🏥 Medical", "fuel": "⛽ Fuel", "atm": "🏧 ATM / Bank"}
+
+
+@st.cache_data(ttl=21600, show_spinner=False)
+def _services_cached(lat: float, lon: float, radius_m: int, kind: str):
+    a = f"(around:{radius_m},{lat:.5f},{lon:.5f})"
+    body = "".join(f'nwr["name"]{flt}{a};' for flt in _SERVICE_FILTERS[kind])
+    if kind in ("fuel", "atm"):
+        body = "".join(f'nwr{flt}{a};' for flt in _SERVICE_FILTERS[kind])
+    query = f"[out:json][timeout:10];({body});out center 150;"
+    deadline = time.monotonic() + 14
+    for url in _OVERPASS_URLS:
+        if time.monotonic() > deadline:
+            break
+        try:
+            resp = requests.post(url, data={"data": query}, headers=_HEADERS, timeout=10)
+            if resp.status_code != 200:
+                continue
+            js = resp.json()
+            remark = str(js.get("remark", "")).lower()
+            if "error" in remark or "timed out" in remark or "out of memory" in remark:
+                continue
+            return js.get("elements", [])
+        except Exception:
+            continue
+    raise RuntimeError("places service unavailable")
+
+
+def find_services_near(center, kind: str = "food", radius_km: float = 5.0, limit: int = 8) -> list:
+    """
+    Restaurants / stays / hospitals / fuel / ATMs around a point (OpenStreetMap, live).
+    Each: name, kind, lat, lon, km_away, plus cuisine / hours / phone / veg when the map has them.
+    OpenStreetMap has NO ratings or reviews, so listings with more details are ranked first, then nearest.
+    """
+    if kind not in _SERVICE_FILTERS or not center or time.monotonic() < _OVERPASS_DOWN_UNTIL[0]:
+        return []
+    try:
+        els = _services_cached(round(center[0], 4), round(center[1], 4), int(radius_km * 1000), kind)
+    except Exception:
+        _OVERPASS_DOWN_UNTIL[0] = time.monotonic() + 180
+        return []
+    out, seen = [], set()
+    for el in els:
+        tags = el.get("tags", {})
+        name = tags.get("name:en") or tags.get("name") or (_SERVICE_LABEL[kind].split(" ", 1)[1] if kind in ("fuel", "atm") else None)
+        lat = el.get("lat") or (el.get("center") or {}).get("lat")
+        lon = el.get("lon") or (el.get("center") or {}).get("lon")
+        if not name or lat is None or lon is None:
+            continue
+        key = (name.lower(), round(lat, 3), round(lon, 3))
+        if key in seen:
+            continue
+        seen.add(key)
+        info = []
+        if tags.get("cuisine"):
+            info.append(str(tags["cuisine"]).replace(";", ", ").replace("_", " "))
+        diet = str(tags.get("diet:vegetarian", ""))
+        if diet in ("yes", "only"):
+            info.append("pure veg" if diet == "only" else "veg available")
+        if tags.get("opening_hours"):
+            info.append("hours: " + str(tags["opening_hours"])[:40])
+        if tags.get("phone") or tags.get("contact:phone"):
+            info.append("phone: " + str(tags.get("phone") or tags.get("contact:phone"))[:20])
+        score = len(info) + (1 if tags.get("website") or tags.get("contact:website") else 0)
+        if tags.get("name:en") or all(ord(c) < 128 for c in name):
+            score += 1                                              # readable name
+        out.append({"name": name, "kind": _SERVICE_LABEL[kind], "lat": lat, "lon": lon,
+                    "km_away": haversine_km(center, (lat, lon)), "info": ", ".join(info), "score": score})
+    out.sort(key=lambda p: (-p["score"], p["km_away"]))
+    return out[:limit]
+
+
 # ─── Itinerary stops ──────────────────────────────────────────────────────────
 
 _PERIOD_LABEL = {"morning": "🌅 Morning", "afternoon": "☀️ Afternoon", "evening": "🌇 Evening"}
