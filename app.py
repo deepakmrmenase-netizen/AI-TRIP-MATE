@@ -646,6 +646,56 @@ def _explore_card(r, key):
             st.rerun()
 
 
+def _render_live_matches(q: str, shown_df):
+    """Searching connects to the live map: any temple / famous place in India, plus temples & sights near the main match."""
+    import html as _h
+    q = (q or "").strip()
+    if len(q) < 3:
+        return
+    with st.spinner("Searching the live map for more places and temples..."):
+        found = suggest_places(q, limit=8)
+    have = {str(x).lower() for x in shown_df["place"]} if not shown_df.empty else set()
+    found = [x for x in found if x["name"].lower() not in have]
+    if found:
+        st.markdown(f'<div class="tm-section-header">🌐 More places matching “{_h.escape(q)}” (live from the map)</div>', unsafe_allow_html=True)
+        for i, x in enumerate(found):
+            c1, c2, c3 = st.columns([5, 1.3, 1.3])
+            with c1:
+                st.markdown(f'<div style="padding:6px 0;"><b>{_h.escape(x["name"])}</b>'
+                            f'<div style="color:#64748b;font-size:0.8rem;">{_h.escape(str(x.get("label", "")))}</div></div>',
+                            unsafe_allow_html=True)
+            with c2:
+                if st.button("✈️ Plan", key=f"lv_plan_{i}", use_container_width=True):
+                    st.session_state["planner_destination"] = x["name"]
+                    st.session_state.current_page = "AI Trip Planner"
+                    st.rerun()
+            with c3:
+                if st.button("🗺️ Route", key=f"lv_route_{i}", use_container_width=True):
+                    st.session_state["map_pending_dest"] = x["name"]
+                    st.session_state.current_page = "Trip Map"
+                    st.rerun()
+
+    # temples & sights around the best match (our list first, else the first live result)
+    center, label = None, ""
+    if not shown_df.empty:
+        r0 = shown_df.iloc[0]
+        center, label = (float(r0["latitude"]), float(r0["longitude"])), str(r0["place"])
+    elif found:
+        center, label = (float(found[0]["lat"]), float(found[0]["lon"])), found[0]["name"]
+    if center:
+        with st.spinner(f"Finding temples and local sights near {label}..."):
+            near = find_places_near(center, radius_km=15.0, limit=12)
+        if near:
+            st.markdown(f'<div class="tm-section-header">🛕 Temples & local sights near {_h.escape(label)}</div>', unsafe_allow_html=True)
+            rows = "".join(
+                f'<div style="display:flex;justify-content:space-between;gap:12px;padding:8px 0;border-bottom:1px solid #f1f5f9;">'
+                f'<span style="font-weight:600;color:#1e293b;">{p["kind"].split(" ", 1)[0]} {_h.escape(p["name"])} '
+                f'<span style="color:#64748b;font-weight:400;font-size:0.8rem;">· {_h.escape(p["kind"].split(" ", 1)[1])}</span></span>'
+                f'<span style="color:#7c3aed;font-size:0.82rem;white-space:nowrap;">{p["km_away"]:.1f} km</span></div>' for p in near)
+            st.markdown(f'<div class="tm-card">{rows}</div>', unsafe_allow_html=True)
+            st.caption("Live from OpenStreetMap, within 15 km. Open the Trip Map to see them on a map.")
+
+
 def _render_explore_browse():
     """Browse ALL India places: search, budget level, type, state, sort and 'show more'."""
     df = _explore_catalog()
@@ -654,31 +704,69 @@ def _render_explore_browse():
         return
 
     ALL = "All"
+    for k in ("ex_tier", "ex_cat", "ex_state"):
+        st.session_state.setdefault(k, ALL)
+
+    def _val(key):
+        v = st.session_state.get(key, ALL)
+        return v.split("  (")[0] if v else ALL
+
+    def _clear():
+        for k in ("ex_tier", "ex_cat", "ex_state"):
+            st.session_state[k] = ALL
+        st.session_state["ex_q"] = ""
+
+    q = (st.session_state.get("ex_q") or "").strip().lower()
+    base = df
+    if q:
+        hay = (df["place"] + " " + df["state"] + " " + df["category"] + " " + df["highlight"] + " " + df["aliases"].fillna("")).str.lower()
+        base = df[hay.str.contains(q, regex=False)]
+
+    def _subset(skip):
+        d = base
+        if skip != "tier" and _val("ex_tier") != ALL:
+            d = d[d["tier"] == _val("ex_tier")]
+        if skip != "cat" and _val("ex_cat") != ALL:
+            d = d[d["category"] == _val("ex_cat")]
+        if skip != "state" and _val("ex_state") != ALL:
+            d = d[d["state"] == _val("ex_state")]
+        return d
+
+    def _options(col, skip, order=None):
+        counts = _subset(skip)[col].value_counts()
+        names = [n for n in (order or sorted(counts.index)) if n in counts.index]
+        return [ALL] + [f"{n}  ({int(counts[n])})" for n in names]
+
+    def _fix(key, options):
+        names = [o.split("  (")[0] for o in options]
+        cur = _val(key)
+        st.session_state[key] = options[names.index(cur)] if cur in names else ALL
+
+    o_tier, o_cat, o_state = _options("tier", "tier", TIERS), _options("category", "cat"), _options("state", "state")
+    _fix("ex_tier", o_tier); _fix("ex_cat", o_cat); _fix("ex_state", o_state)
+
     c1, c2, c3 = st.columns([2, 1.3, 1.3])
     with c1:
-        q = st.text_input("🔍 Search", placeholder="Place, state or what it is known for - e.g. beach, palace, Kerala",
-                          key="ex_q").strip().lower()
+        st.text_input("🔍 Search any place, temple or famous spot",
+                      placeholder="e.g. Sringeri, Kigga, beach, palace, Kerala", key="ex_q")
     with c2:
-        tier = st.selectbox("💰 Budget level", [ALL] + TIERS, key="ex_tier",
-                            help="Cheap: under ₹2,500 · Mid-range: ₹2,500-7,999 · Royal / Luxury: ₹8,000+")
+        st.selectbox("💰 Budget level", o_tier, key="ex_tier",
+                     help="Cheap: under ₹2,500 · Mid-range: ₹2,500-7,999 · Royal / Luxury: ₹8,000+")
     with c3:
-        sort = st.selectbox("↕️ Sort by", ["Cheapest first", "Costliest first", "A to Z"], key="ex_sort")
-    c4, c5 = st.columns(2)
+        st.selectbox("↕️ Sort by", ["Cheapest first", "Costliest first", "A to Z"], key="ex_sort")
+    c4, c5, c6 = st.columns([1.5, 1.5, 0.8])
     with c4:
-        cat = st.selectbox("🏷️ Type", [ALL] + sorted(df["category"].unique()), key="ex_cat")
+        st.selectbox("🏷️ Type", o_cat, key="ex_cat")
     with c5:
-        state = st.selectbox("📍 State", [ALL] + sorted(df["state"].unique()), key="ex_state")
+        st.selectbox("📍 State", o_state, key="ex_state")
+    with c6:
+        st.write("")
+        st.write("")
+        st.button("🔄 Clear", on_click=_clear, key="ex_clear", use_container_width=True)
 
-    f = df
-    if q:
-        hay = (f["place"] + " " + f["state"] + " " + f["category"] + " " + f["highlight"] + " " + f["aliases"].fillna("")).str.lower()
-        f = f[hay.str.contains(q, regex=False)]
-    if tier != ALL:
-        f = f[f["tier"] == tier]
-    if cat != ALL:
-        f = f[f["category"] == cat]
-    if state != ALL:
-        f = f[f["state"] == state]
+    q = (st.session_state.get("ex_q") or "").strip()
+    tier, cat, state, sort = _val("ex_tier"), _val("ex_cat"), _val("ex_state"), st.session_state.get("ex_sort", "Cheapest first")
+    f = _subset(None)
     f = {"Cheapest first": f.sort_values(["budget_min", "place"]),
          "Costliest first": f.sort_values(["budget_min", "place"], ascending=[False, True]),
          "A to Z": f.sort_values("place")}[sort].reset_index(drop=True)
@@ -690,11 +778,9 @@ def _render_explore_browse():
 
     st.markdown(f'<div style="font-size:0.85rem;color:#64748b;margin:6px 0 12px 0;">'
                 f'<b>{len(f)}</b> of {len(df)} places · showing {min(n, len(f))}</div>', unsafe_allow_html=True)
-    if f.empty:
-        st.info("No places match. Try a shorter search or set a filter back to 'All'.")
-        return
-
     show = f.head(n)
+    if f.empty:
+        st.info("No place in TripMate's own list matches these filters. Press 🔄 Clear, or see the live results below.")
     for start in range(0, len(show), 3):
         cols = st.columns(3)
         for j, (_, r) in enumerate(show.iloc[start:start + 3].iterrows()):
@@ -705,7 +791,9 @@ def _render_explore_browse():
             st.session_state["ex_n"] = n + 12
             st.rerun()
 
-    if FOLIUM_AVAILABLE:
+    _render_live_matches(q, f)
+
+    if FOLIUM_AVAILABLE and not f.empty:
         st.markdown('<div class="tm-section-header">🗺️ These places on the map</div>', unsafe_allow_html=True)
         fmap, ok = build_india_map(f)
         if ok and fmap:
