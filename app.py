@@ -567,6 +567,140 @@ def _render_download_tab(trip: dict):
         st.code(trip_text, language=None)
 
 
+
+def _explore_catalog():
+    """All-India places joined with the richer destination notes (description, best time, tip) when we have them."""
+    import pandas as pd
+    df = load_india_places().copy()
+    try:
+        dd = load_destinations().copy()
+        dd["_k"] = dd["destination"].str.lower().str.strip()
+        df["_k"] = df["place"].str.lower().str.strip()
+        df = df.merge(dd[["_k", "description", "best_time", "student_tip", "duration_days"]], on="_k", how="left")
+    except Exception:
+        for c in ("description", "best_time", "student_tip", "duration_days"):
+            df[c] = None
+    return df
+
+
+def _explore_card(r, key):
+    import html as _h
+    tier = str(r["tier"])
+    color = TIER_HEX.get(tier, "#2563eb")
+    name, state = _h.escape(str(r["place"])), _h.escape(str(r["state"]))
+    known = [x.strip() for x in str(r["highlight"]).split(",") if x.strip()][:4]
+    chips = " ".join(f'<span class="tm-badge">{_h.escape(k)}</span>' for k in known)
+    desc = r.get("description")
+    extra = ""
+    if isinstance(desc, str) and desc:
+        extra += f'<p style="color:#475569;font-size:0.84rem;line-height:1.55;margin:8px 0;">{_h.escape(desc[:140])}{"…" if len(desc) > 140 else ""}</p>'
+    bt = r.get("best_time")
+    tip = r.get("student_tip")
+    meta = f'<span>🌤️ {_h.escape(str(bt))}</span>' if isinstance(bt, str) and bt else ""
+    tip_html = (f'<div style="background:#f0fdf4;border-radius:8px;padding:7px 10px;font-size:0.78rem;color:#15803d;margin-top:8px;">'
+                f'💡 {_h.escape(str(tip)[:110])}{"…" if len(str(tip)) > 110 else ""}</div>') if isinstance(tip, str) and tip else ""
+    st.markdown(f"""
+<div class="tm-card" style="border-top:4px solid {color};padding:16px 18px;min-height:230px;">
+  <div style="display:flex;justify-content:space-between;gap:8px;align-items:flex-start;">
+    <div><div style="font-size:1.08rem;font-weight:700;color:#1e293b;">{name}</div>
+         <div style="color:#64748b;font-size:0.8rem;">📍 {state} · {_h.escape(str(r['category']))}</div></div>
+    <div style="text-align:right;"><div style="font-weight:700;color:{color};white-space:nowrap;">₹{int(r['budget_min']):,}–{int(r['budget_max']):,}</div>
+         <div style="font-size:0.72rem;color:#64748b;">per person</div></div>
+  </div>
+  <div style="margin:6px 0 0 0;"><span style="background:{color}22;color:{color};font-weight:700;font-size:0.72rem;border-radius:20px;padding:2px 10px;">{tier}</span>
+       <span style="color:#64748b;font-size:0.78rem;margin-left:8px;">{meta}</span></div>
+  {extra}
+  <div style="margin-top:8px;">{chips}</div>
+  {tip_html}
+</div>""", unsafe_allow_html=True)
+    b1, b2 = st.columns(2)
+    with b1:
+        if st.button("✈️ Plan trip", key=f"ex_plan_{key}", use_container_width=True):
+            st.session_state["planner_destination"] = str(r["place"])
+            st.session_state.current_page = "AI Trip Planner"
+            st.rerun()
+    with b2:
+        if st.button("🗺️ Route", key=f"ex_route_{key}", use_container_width=True):
+            st.session_state["map_pending_dest"] = str(r["place"])
+            st.session_state.current_page = "Trip Map"
+            st.rerun()
+
+
+def _render_explore_browse():
+    """Browse ALL India places: search, budget level, type, state, sort and 'show more'."""
+    df = _explore_catalog()
+    if df.empty:
+        st.info("Place data is not available - please upload the latest data_loader.py.")
+        return
+
+    ALL = "All"
+    c1, c2, c3 = st.columns([2, 1.3, 1.3])
+    with c1:
+        q = st.text_input("🔍 Search", placeholder="Place, state or what it is known for - e.g. beach, palace, Kerala",
+                          key="ex_q").strip().lower()
+    with c2:
+        tier = st.selectbox("💰 Budget level", [ALL] + TIERS, key="ex_tier",
+                            help="Cheap: under ₹2,500 · Mid-range: ₹2,500-7,999 · Royal / Luxury: ₹8,000+")
+    with c3:
+        sort = st.selectbox("↕️ Sort by", ["Cheapest first", "Costliest first", "A to Z"], key="ex_sort")
+    c4, c5 = st.columns(2)
+    with c4:
+        cat = st.selectbox("🏷️ Type", [ALL] + sorted(df["category"].unique()), key="ex_cat")
+    with c5:
+        state = st.selectbox("📍 State", [ALL] + sorted(df["state"].unique()), key="ex_state")
+
+    f = df
+    if q:
+        hay = (f["place"] + " " + f["state"] + " " + f["category"] + " " + f["highlight"] + " " + f["aliases"].fillna("")).str.lower()
+        f = f[hay.str.contains(q, regex=False)]
+    if tier != ALL:
+        f = f[f["tier"] == tier]
+    if cat != ALL:
+        f = f[f["category"] == cat]
+    if state != ALL:
+        f = f[f["state"] == state]
+    f = {"Cheapest first": f.sort_values(["budget_min", "place"]),
+         "Costliest first": f.sort_values(["budget_min", "place"], ascending=[False, True]),
+         "A to Z": f.sort_values("place")}[sort].reset_index(drop=True)
+
+    sig = (q, tier, cat, state, sort)
+    if st.session_state.get("ex_sig") != sig:                 # filters changed -> start from the first page
+        st.session_state["ex_sig"], st.session_state["ex_n"] = sig, 12
+    n = st.session_state.get("ex_n", 12)
+
+    st.markdown(f'<div style="font-size:0.85rem;color:#64748b;margin:6px 0 12px 0;">'
+                f'<b>{len(f)}</b> of {len(df)} places · showing {min(n, len(f))}</div>', unsafe_allow_html=True)
+    if f.empty:
+        st.info("No places match. Try a shorter search or set a filter back to 'All'.")
+        return
+
+    show = f.head(n)
+    for start in range(0, len(show), 3):
+        cols = st.columns(3)
+        for j, (_, r) in enumerate(show.iloc[start:start + 3].iterrows()):
+            with cols[j]:
+                _explore_card(r, f"{start + j}_{r['place']}")
+    if n < len(f):
+        if st.button(f"⬇️ Show more ({len(f) - n} left)", use_container_width=True, key="ex_more"):
+            st.session_state["ex_n"] = n + 12
+            st.rerun()
+
+    if FOLIUM_AVAILABLE:
+        st.markdown('<div class="tm-section-header">🗺️ These places on the map</div>', unsafe_allow_html=True)
+        fmap, ok = build_india_map(f)
+        if ok and fmap:
+            render_map(fmap, height=460)
+            st.caption("🟢 Cheap  |  🔵 Mid-range  |  🟣 Royal / Luxury")
+
+
+try:
+    _wrapped_b = st.fragment(_render_explore_browse)
+    if callable(_wrapped_b):
+        _render_explore_browse = _wrapped_b
+except Exception:
+    pass
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 #  PAGE: EXPLORE DESTINATIONS
 # ══════════════════════════════════════════════════════════════════════════════
@@ -578,36 +712,7 @@ def page_explore():
     tab1, tab2 = st.tabs(["🔍 Browse All", "💰 Trips Under My Budget"])
 
     with tab1:
-        # Filters
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            search_q = st.text_input("🔍 Search destinations...", placeholder="e.g. beach, history, nature")
-        with col2:
-            travel_types = get_all_travel_types()
-            filter_type = st.selectbox("🏷️ Travel Type", options=travel_types)
-        with col3:
-            max_b = st.selectbox("💰 Max Budget (per person)", options=[0] + BUDGET_PRESETS,
-                                  format_func=lambda x: "Any budget" if x == 0 else f"Under ₹{x:,}")
-
-        results = search_destinations(
-            query=search_q,
-            travel_type=filter_type if filter_type != "All" else "",
-            max_budget=max_b,
-        )
-
-        st.markdown(f'<div style="font-size:0.85rem; color:#64748b; margin-bottom:12px;">{len(results)} destination{"s" if len(results)!=1 else ""} found</div>', unsafe_allow_html=True)
-        render_destination_grid(results, key_prefix="explore_")
-
-        # All destinations map
-        if FOLIUM_AVAILABLE:
-            st.markdown('<div class="tm-section-header">🗺️ Destinations Map</div>', unsafe_allow_html=True)
-            with st.spinner("Loading destinations map..."):
-                fmap, ok = build_india_map(load_india_places())
-                if ok and fmap:
-                    render_map(fmap, height=460)
-                    st.caption("🟢 Cheap  |  🔵 Mid-range  |  🟣 Royal / Luxury - open the Trip Map page for filters and routes.")
-        else:
-            st.info("Install `folium` and `streamlit-folium` for an interactive destinations map.")
+        _render_explore_browse()
 
     with tab2:
         st.markdown("#### 🎒 Find Trips Within Your Budget")
