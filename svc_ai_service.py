@@ -67,11 +67,59 @@ def _ai_ready() -> bool:
     return bool(GEMINI_API_KEY) and not DEMO_MODE
 
 
+_MODEL_CACHE = {"list": None, "bad": set()}
+
+
+def _usable_models() -> list:
+    """Ask Google which models THIS key can use (model names change over time), best 'flash' first."""
+    import requests
+    if _MODEL_CACHE["list"]:
+        return [m for m in _MODEL_CACHE["list"] if m not in _MODEL_CACHE["bad"]]
+    found = []
+    try:
+        r = requests.get("https://generativelanguage.googleapis.com/v1beta/models",
+                         headers={"x-goog-api-key": GEMINI_API_KEY}, params={"pageSize": 200}, timeout=20)
+        if r.status_code == 200:
+            for m in r.json().get("models", []):
+                if "generateContent" in m.get("supportedGenerationMethods", []):
+                    found.append(m["name"].split("/")[-1])
+    except Exception:
+        pass
+
+    def rank(name: str):
+        n = name.lower()
+        if any(x in n for x in ("embed", "image", "tts", "audio", "live", "vision", "robotics", "computer", "thinking", "learnlm", "gemma", "aqa")):
+            return 99
+        score = 50
+        if "flash" in n:
+            score = 10
+        if "lite" in n:
+            score += 5
+        if "preview" in n or "exp" in n:
+            score += 8
+        if n.startswith("gemini-2.5"):
+            score -= 4
+        elif n.startswith("gemini-3"):
+            score -= 3
+        elif n.startswith("gemini-2.0"):
+            score -= 1
+        if n.endswith("-latest"):
+            score -= 2
+        return score
+
+    found = sorted((m for m in set(found) if rank(m) < 99), key=lambda m: (rank(m), m))
+    fallback = ["gemini-flash-latest", "gemini-2.5-flash", "gemini-2.0-flash", "gemini-flash-lite-latest"]
+    order = (found[:6] or []) + [m for m in fallback if m not in found]
+    if found:
+        _MODEL_CACHE["list"] = order
+    return order
+
+
 def _rest_generate(prompt: str, expect_json: bool = False) -> str:
     """Call Gemini through its public web API. Needs only `requests` and the API key (no extra install)."""
     import requests
-    last = "unknown error"
-    for model in _GEMINI_MODELS:
+    problems = []
+    for model in _usable_models()[:6]:
         body = {"contents": [{"parts": [{"text": prompt}]}]}
         if expect_json:
             body["generationConfig"] = {"responseMimeType": "application/json"}
@@ -81,22 +129,25 @@ def _rest_generate(prompt: str, expect_json: bool = False) -> str:
                 headers={"x-goog-api-key": GEMINI_API_KEY, "Content-Type": "application/json"},
                 json=body, timeout=45)
         except Exception as exc:
-            last = f"network error ({type(exc).__name__})"
+            problems.append(f"{model}: network error ({type(exc).__name__})")
             continue
         if r.status_code == 200:
             try:
-                return r.json()["candidates"][0]["content"]["parts"][0]["text"]
+                text = r.json()["candidates"][0]["content"]["parts"][0]["text"]
+                return text
             except Exception:
-                last = "empty answer from Gemini"
+                problems.append(f"{model}: empty answer")
                 continue
         try:
             msg = r.json().get("error", {}).get("message", "")
         except Exception:
             msg = ""
-        last = f"{model}: HTTP {r.status_code} {msg[:120]}"
-        if r.status_code in (400, 401, 403):      # bad / blocked key: other models will fail too
-            break
-    raise RuntimeError(last)
+        problems.append(f"{model}: HTTP {r.status_code} {msg[:90]}")
+        if r.status_code == 404:
+            _MODEL_CACHE["bad"].add(model)            # this model name is not available for this key
+        if r.status_code in (400, 401, 403) and "not found" not in msg.lower() and "not supported" not in msg.lower():
+            break                                     # bad / blocked key: other models fail too
+    raise RuntimeError(" | ".join(problems[:3]) or "no Gemini model available for this key")
 
 
 def call_ai(prompt: str, expect_json: bool = False) -> str:
@@ -107,14 +158,6 @@ def call_ai(prompt: str, expect_json: bool = False) -> str:
     """
     if not GEMINI_API_KEY:
         raise RuntimeError("AI model not available.")
-    handle = _get_model()
-    if handle is not None:
-        try:
-            if GENAI_SDK == "new":
-                return handle.models.generate_content(model="gemini-2.0-flash", contents=prompt).text
-            return handle.generate_content(prompt).text
-        except Exception:
-            pass                                   # fall through to the web API
     return _rest_generate(prompt, expect_json)
 
 
