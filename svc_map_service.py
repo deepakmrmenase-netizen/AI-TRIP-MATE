@@ -486,6 +486,43 @@ def google_maps_link(o, d) -> str:
 
 # ---- main entry --------------------------------------------------------------
 
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def _osrm_table_cached(src: tuple, dests: tuple):
+    """Road distance + time from ONE start to MANY places in a single call. Raises on failure (not cached)."""
+    pts = [src] + list(dests)
+    coords = ";".join(f"{lon:.5f},{lat:.5f}" for lat, lon in pts)
+    for base in _OSRM_URLS:
+        try:
+            resp = requests.get(f"{base.replace('/route/', '/table/')}/{coords}",
+                                params={"sources": "0", "annotations": "distance,duration"},
+                                headers=_HEADERS, timeout=_TIMEOUT + 4)
+            js = resp.json()
+            if resp.status_code == 200 and js.get("code") == "Ok":
+                return [(d, t) for d, t in zip(js["distances"][0][1:], js["durations"][0][1:])]
+        except Exception:
+            continue
+    raise RuntimeError("table service unavailable")
+
+
+def road_distances(origin, dests: list):
+    """
+    Real road [(km, minutes), ...] from origin to each place (OpenStreetMap routing), minutes include
+    typical traffic. Returns None when the service is unreachable.
+    """
+    if not dests:
+        return []
+    try:
+        res = _osrm_table_cached((round(origin[0], 5), round(origin[1], 5)),
+                                 tuple((round(a, 5), round(b, 5)) for a, b in dests))
+    except Exception:
+        return None
+    out = []
+    for d, t in res:
+        out.append((None, None) if d is None or t is None else (d / 1000.0, t / 60.0 * TRAFFIC_FACTOR))
+    return out
+
+
 def _label(r: dict) -> str:
     via = f"via {r['via']} - " if r.get("via") else ""
     return f"{via}{r['distance_km']:,.0f} km - {format_hours(r['duration_min'] / 60)}"
