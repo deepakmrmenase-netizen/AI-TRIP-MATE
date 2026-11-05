@@ -603,18 +603,149 @@ def _facts_for(message: str):
         return None
 
 
-def get_demo_response(user_message: str) -> str:
-    """Return a canned demo response based on keywords in the user message."""
-    msg = user_message.lower()
+_SERVICE_WORDS = [
+    ("food", ("breakfast", "lunch", "dinner", "food", "eat", "restaurant", "cafe", "tiffin", "meal", "snack", "hungry", "veg")),
+    ("medical", ("hospital", "doctor", "clinic", "medical", "pharmacy", "medicine")),
+    ("fuel", ("petrol", "diesel", "fuel", "gas station", "pump")),
+    ("atm", ("atm", "bank", "cash")),
+    ("stay", ("hotel", "stay", "lodge", "room", "hostel", "accommodation", "guesthouse", "homestay", "resort")),
+]
+
+
+def _service_answer(msg: str, history=None):
+    """'best hotel for breakfast in Sringeri', 'hospital near Hampi' ... answered from live map listings."""
+    low = " " + msg.lower() + " "
+    import re
+    kind = next((k for k, words in _SERVICE_WORDS
+                 if any(re.search(r"\b" + re.escape(w) + r"\b", low) for w in words)), None)
+    if not kind:
+        return None
+    found = _find_place_in_message(msg)
+    if found and found[0] == "state":
+        found = None
+    if not found:
+        found = _context_place(history)
+    if not found:
+        return ("📍 **Which place?** Tell me the town, for example *best breakfast in Sringeri* or *hospital near Hampi*, "
+                "and I'll list what the map has around it.")
+    name, center = (found[1]["place"], (float(found[1]["latitude"]), float(found[1]["longitude"]))) if found[0] == "dataset" \
+        else (found[1][0], found[1][1])
+    name = str(name).split(" (")[0]
+    from svc_map_service import find_services_near, road_distances
+    items = find_services_near(center, kind, radius_km=6.0, limit=8)
+    label = {"food": "places to eat", "stay": "hotels and stays", "medical": "hospitals and medical shops",
+             "fuel": "fuel stations", "atm": "ATMs and banks"}[kind]
+    meal = next((w for w in ("breakfast", "lunch", "dinner") if w in low), "")
+    q = f"{meal + ' ' if meal else ''}{'restaurants' if kind == 'food' else label} near {name}".replace(" ", "+")
+    gmaps = f"https://www.google.com/maps/search/{q}"
+    if not items:
+        return (f"I couldn't load {label} around **{name}** right now (the map service is busy or has no listing). "
+                f"[Search on Google Maps]({gmaps}) for ratings and photos.")
+    rd = road_distances(center, [(p["lat"], p["lon"]) for p in items])
+    lines = []
+    for i, p in enumerate(items):
+        d = f"{rd[i][0]:.1f} km by road" if rd and rd[i][0] is not None else f"~{p['km_away'] * 1.3:.1f} km"
+        lines.append(f"{i + 1}. **{p['name']}** - {d}" + (f" ({p['info']})" if p["info"] else ""))
+    intro = f"{'🍽️' if kind == 'food' else '📍'} **{label.capitalize()} near {name}** (from the live map)"
+    if kind == "food":
+        tip = ("\n\n💡 Local tip: in Karnataka towns, breakfast is usually idli, vada, dosa, upma or khara bath at small darshini "
+               "hotels, which open early (about 6:30-7:30 AM) and cost about ₹40-100. " if meal in ("breakfast", "") else "\n\n")
+        if "sringeri" in name.lower():
+            tip += ("The Sharada Peetham temple complex is known for serving free meals to pilgrims, so check timings at the temple office. ")
+    else:
+        tip = "\n\n"
+    return (intro + "\n\n" + "\n".join(lines) + tip +
+            f"\n\n⚠️ The map has no ratings or reviews, so I can't say which is the *best*. "
+            f"[See ratings and photos on Google Maps]({gmaps}) before choosing.")
+
+
+def _context_place(history):
+    """Last place the user talked about (chat history, then the destination typed in the planner)."""
+    for m in reversed(history or []):
+        if m.get("role") == "user":
+            f = _find_place_in_message(str(m.get("content", "")))
+            if f and f[0] in ("dataset", "online"):
+                return f
+    try:
+        import streamlit as _st
+        d = _st.session_state.get("planner_destination")
+        if d:
+            r = _resolve_place(str(d))
+            if r:
+                return "online", (r[0], r[1])
+    except Exception:
+        pass
+    return None
+
+
+def _suggestions_answer(msg: str = "") -> str:
+    """Destination ideas from TripMate's all-India list, grouped by budget."""
+    try:
+        from data_loader import load_india_places
+        df = load_india_places()
+        df = df[df["category"] != "Luxury Stay"]
+        low = msg.lower()
+        for cat in sorted(df["category"].unique()):
+            if cat.split(" & ")[0].lower() in low:
+                df = df[df["category"] == cat]
+                break
+        else:
+            for kw, cat in (("temple", "Spiritual"), ("pilgrim", "Spiritual"), ("beach", "Beach & Islands"),
+                            ("hill", "Nature & Hills"), ("nature", "Nature & Hills"), ("wild", "Wildlife & Adventure"),
+                            ("palace", "Heritage & Royal"), ("heritage", "Heritage & Royal"), ("city", "City & Culture")):
+                if kw in low:
+                    df = df[df["category"] == cat]
+                    break
+        lines = []
+        for tier, label in (("Cheap", "💚 Cheap (under ₹2,500)"), ("Mid-range", "💙 Mid-range (₹2,500-7,999)"), ("Royal / Luxury", "💜 Royal / Luxury (₹8,000+)")):
+            pool = df[df["tier"] == tier].sort_values(["budget_min", "place"])
+            sub = pool.groupby("category", sort=False).head(1).head(4)          # a mix of types, not 4 of the same
+            if len(sub) < 4:
+                sub = pool.head(4)
+            if len(sub):
+                lines.append(f"**{label}**\n" + "\n".join(
+                    f"- **{r.place}** ({r.state}) - {r.highlight.split(',')[0].strip()}, ₹{int(r.budget_min):,}-{int(r.budget_max):,}" for r in sub.itertuples()))
+        if lines:
+            return ("✨ **Destination ideas for you:**\n\n" + "\n\n".join(lines) +
+                    "\n\n💬 Tell me your **budget**, **days** and what you like (beach, temples, hills, wildlife...) "
+                    "and I'll narrow it down. Or ask about any of these, for example *tell me about Gokarna*.")
+    except Exception:
+        pass
+    return DEMO_RESPONSES["budget"]
+
+
+def get_demo_response(user_message: str, history: list = None) -> str:
+    """Answer without an AI key: real place/distance facts from maps, destination ideas, tips and follow-up questions."""
+    msg = user_message.lower().strip()
     generic = any(k in msg for k in ["pack", "packing", "save money", "money tip", "photography", "hostel"])
+    if not any(k in msg for k in ("pack", "packing", "save money", "money tip", "photography")):
+        try:
+            svc = _service_answer(user_message, history)
+        except Exception:
+            svc = None
+        if svc:
+            return svc
     if not generic:
         answer = _facts_for(user_message)
         if answer:
             return answer
-    if any(k in msg for k in ["mysuru", "mysore"]):
-        return DEMO_RESPONSES["mysuru"]
+
+        nearby_words = ("near", "nearby", "around", "close to", "places to visit", "things to do", "what to see", "tourist", "visit")
+        suggest_words = ("suggest", "recommend", "where to go", "where should", "destination", "ideas", "idea", "which place", "best place", "plan")
+        if any(k in msg for k in nearby_words):
+            ctx = _context_place(history)
+            if ctx:
+                name = ctx[1]["place"] if ctx[0] == "dataset" else ctx[1][0]
+                ans = _place_answer(f"tell me about {name}")
+                if ans:
+                    return f"(Showing places around **{name}**. Tell me another place name to change it.)\n\n" + ans
+            return ("📍 **Near which place?** Tell me a town or landmark, for example *places near Sringeri* or "
+                    "*what to see in Gokarna*, and I'll list the temples and sights around it with real road distances.")
+        if any(k in msg for k in suggest_words) and not any(k in msg for k in ("under", "₹", "budget", "cheap")):
+            return _suggestions_answer(msg)
+
     if any(k in msg for k in ["₹", "budget", "cheap trip", "under", "affordable", "3000", "2000", "5000"]):
-        return DEMO_RESPONSES["budget"]
+        return _suggestions_answer(msg)
     if any(k in msg for k in ["save money", "saving", "money tip", "cut cost", "reduce"]):
         return DEMO_RESPONSES["save"]
     if any(k in msg for k in ["pack", "packing", "carry", "bring", "checklist"]):
@@ -625,7 +756,20 @@ def get_demo_response(user_message: str) -> str:
         return DEMO_RESPONSES["accommodation"]
     if any(k in msg for k in ["travel cheap", "cheapest", "bus", "train", "transport", "how to travel"]):
         return DEMO_RESPONSES["cheap"]
-    return DEMO_RESPONSES["default"]
+
+    # a short message may just be a place name ("Kigga", "Hampi")
+    if len(msg.split()) <= 4:
+        r = _resolve_place(user_message)
+        if r:
+            ans = _place_answer(f"tell me about {r[0]}")
+            if ans:
+                return ans
+    return ("🤔 I didn't fully get that. I can answer questions like:\n\n"
+            "- *places near Sringeri* or *what to see in Hampi*\n"
+            "- *Kudlu Falls to Horanadu distance* (road km, time and cost)\n"
+            "- *suggest a beach trip* or *trips under ₹3,000*\n"
+            "- *how to save money*, *what to pack*, *budget stay*\n\n"
+            "Type a place name and I'll tell you what is around it.")
 
 
 def chat_with_ai(user_message: str, history: list = None) -> str:
@@ -635,7 +779,7 @@ def chat_with_ai(user_message: str, history: list = None) -> str:
     Falls back to demo responses if API is unavailable.
     """
     if not _ai_ready():
-        return get_demo_response(user_message)
+        return get_demo_response(user_message, history)
 
     try:
         # Build conversation context
@@ -652,7 +796,7 @@ def chat_with_ai(user_message: str, history: list = None) -> str:
 
         return call_ai(context)
     except Exception:
-        return get_demo_response(user_message)
+        return get_demo_response(user_message, history)
 
 
 # ─── Budget Optimisation AI ───────────────────────────────────────────────────
