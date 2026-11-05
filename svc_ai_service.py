@@ -59,26 +59,63 @@ def _get_model():
 
 # ─── Core AI Call ─────────────────────────────────────────────────────────────
 
+_GEMINI_MODELS = ["gemini-2.0-flash", "gemini-2.5-flash", "gemini-1.5-flash"]
+LAST_AI_ERROR = [""]          # short reason shown to the user when AI could not be used
+
+
+def _ai_ready() -> bool:
+    return bool(GEMINI_API_KEY) and not DEMO_MODE
+
+
+def _rest_generate(prompt: str, expect_json: bool = False) -> str:
+    """Call Gemini through its public web API. Needs only `requests` and the API key (no extra install)."""
+    import requests
+    last = "unknown error"
+    for model in _GEMINI_MODELS:
+        body = {"contents": [{"parts": [{"text": prompt}]}]}
+        if expect_json:
+            body["generationConfig"] = {"responseMimeType": "application/json"}
+        try:
+            r = requests.post(
+                f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
+                headers={"x-goog-api-key": GEMINI_API_KEY, "Content-Type": "application/json"},
+                json=body, timeout=45)
+        except Exception as exc:
+            last = f"network error ({type(exc).__name__})"
+            continue
+        if r.status_code == 200:
+            try:
+                return r.json()["candidates"][0]["content"]["parts"][0]["text"]
+            except Exception:
+                last = "empty answer from Gemini"
+                continue
+        try:
+            msg = r.json().get("error", {}).get("message", "")
+        except Exception:
+            msg = ""
+        last = f"{model}: HTTP {r.status_code} {msg[:120]}"
+        if r.status_code in (400, 401, 403):      # bad / blocked key: other models will fail too
+            break
+    raise RuntimeError(last)
+
+
 def call_ai(prompt: str, expect_json: bool = False) -> str:
     """
     Call the Gemini API with the given prompt.
+    Uses the official SDK when installed, otherwise the plain web API (works on Streamlit Cloud as is).
     Returns the raw text response or raises an exception.
     """
-    handle = _get_model()
-    if handle is None:
+    if not GEMINI_API_KEY:
         raise RuntimeError("AI model not available.")
-    try:
-        if GENAI_SDK == "new":
-            response = handle.models.generate_content(
-                model="gemini-2.0-flash",
-                contents=prompt,
-            )
-            return response.text
-        else:
-            response = handle.generate_content(prompt)
-            return response.text
-    except Exception as exc:
-        raise RuntimeError(f"AI API error: {exc}") from exc
+    handle = _get_model()
+    if handle is not None:
+        try:
+            if GENAI_SDK == "new":
+                return handle.models.generate_content(model="gemini-2.0-flash", contents=prompt).text
+            return handle.generate_content(prompt).text
+        except Exception:
+            pass                                   # fall through to the web API
+    return _rest_generate(prompt, expect_json)
 
 
 # ─── Trip Generation ──────────────────────────────────────────────────────────
@@ -162,10 +199,11 @@ def generate_trip_plan(trip_params: dict) -> dict:
     Generate a complete trip plan.
     Returns a dict with trip data (either from AI or demo fallback).
     """
-    if DEMO_MODE or not GENAI_AVAILABLE or not GEMINI_API_KEY:
+    if not _ai_ready():
         return _demo_trip(trip_params)
 
     try:
+        LAST_AI_ERROR[0] = ""
         prompt = build_trip_prompt(trip_params)
         raw = call_ai(prompt, expect_json=True)
         parsed = safe_json_parse(raw)
@@ -177,14 +215,59 @@ def generate_trip_plan(trip_params: dict) -> dict:
                 ts["estimated_cost"] = estimated
             ts["savings"] = max(0, ts.get("total_budget", 0) - ts.get("estimated_cost", 0))
             return parsed
-        # If JSON parse failed, fall back
+        LAST_AI_ERROR[0] = "AI answer was not valid plan JSON"
         return _demo_trip(trip_params)
+    except Exception as exc:
+        LAST_AI_ERROR[0] = str(exc)[:200]
+        return _demo_trip(trip_params)
+
+
+def _nearby_spots(destination: str, radius_km: float = 45.0, want: int = 12) -> list:
+    """Real places around the destination from TripMate's own lists: [(name, note, km_away)]."""
+    try:
+        from svc_map_service import lookup_coordinates, haversine_km
+        from data_loader import load_india_places, load_route_stops
     except Exception:
-        return _demo_trip(trip_params)
+        return []
+    c = lookup_coordinates(destination)
+    if not c:
+        return []
+    spots, seen = [], set()
+    try:
+        for _, r in load_india_places().iterrows():
+            if str(r["category"]) == "Luxury Stay" or int(r["budget_min"]) >= 8000:
+                continue
+            km = haversine_km(c, (float(r["latitude"]), float(r["longitude"])))
+            if km <= radius_km:
+                hl = [h.strip() for h in str(r["highlight"]).split(",") if h.strip()]
+                for h in (hl or [str(r["place"])]):
+                    if h[:1].islower() or len(h) < 5:      # skip generic words like "forests"
+                        continue
+                    spots.append((h, f"Visit {h} ({r['category'].lower()})", km))
+    except Exception:
+        pass
+    try:
+        for _, r in load_route_stops().iterrows():
+            km = haversine_km(c, (float(r["latitude"]), float(r["longitude"])))
+            if km <= radius_km:
+                kind = str(r["kind"]).split(" ", 1)[-1]
+                spots.append((str(r["name"]), f"Visit {r['name']} - {kind.lower()}", km))
+    except Exception:
+        pass
+    spots.sort(key=lambda s: s[2])
+    out = []
+    for name, note, km in spots:
+        key = name.lower()
+        core = key.split(" (")[0].strip()
+        if core in ("sunset point", "viewpoint") or any(
+                core in o.lower() or o.lower().split(" (")[0] in key for o, _, _ in out):
+            continue
+        out.append((name, note, km))
+    return out[:want]
 
 
 def _demo_trip(trip_params: dict) -> dict:
-    """Return a demo trip plan populated with the user's params."""
+    """Demo plan built for the REAL destination from TripMate's own place lists (no AI needed)."""
     sample_data = load_sample_trips()
     template = sample_data.get("demo_itinerary_template", {})
 
@@ -193,32 +276,35 @@ def _demo_trip(trip_params: dict) -> dict:
     travelers = trip_params.get("travelers", 1)
     destination = trip_params.get("destination", "Mysuru")
     origin = trip_params.get("origin", "Bengaluru")
-
-    # Scale costs proportionally from the sample budget (4000)
     scale = budget / 4000.0
+    pretty = str(destination).strip().title() if str(destination).strip().islower() else str(destination).strip()
 
-    # Use first sample trip as base if available
-    sample_trips = sample_data.get("sample_trips", [])
-    base = sample_trips[0] if sample_trips else {}
-    base_days = base.get("days", [])
-
-    # Build days list for the requested duration
+    spots = _nearby_spots(destination)
+    stay = f"Budget guesthouse in {pretty}"
     days = []
     for d in range(1, duration + 1):
-        if d <= len(base_days):
-            day = json.loads(json.dumps(base_days[d - 1]))  # deep copy
-        else:
-            day = {
-                "day": d,
-                "morning": {"place": f"Day {d} Morning – Local Exploration", "activity": "Explore nearby attractions", "transport": "Walking / Local Bus", "cost": int(50 * scale), "duration": "2 hours"},
-                "afternoon": {"place": "Local Market", "activity": "Lunch and local sightseeing", "lunch": "Local restaurant", "transport": "Auto", "cost": int(150 * scale), "duration": "2 hours"},
-                "evening": {"place": "City Garden / Viewpoint", "activity": "Relaxation and photography", "transport": "Walking", "cost": int(30 * scale), "duration": "1.5 hours"},
-                "night": {"accommodation": "Budget Guesthouse", "dinner": "Street food / Darshini", "cost": int(350 * scale)},
-            }
-        day["day"] = d
-        days.append(day)
+        pick = lambda i: spots[(d - 1) * 3 + i] if (d - 1) * 3 + i < len(spots) else None
+        slots = {}
+        for i, (slot, trans, mins) in enumerate((("morning", "Walk / local auto", "2 hours"),
+                                                 ("afternoon", "Local bus / auto", "2 hours"),
+                                                 ("evening", "Walk / shared auto", "1.5 hours"))):
+            s = pick(i)
+            if s:
+                name, note, km = s
+                place, activity = name, note + (f" - about {km:.0f} km from {pretty}" if km > 3 else "")
+            elif i == 0:
+                place, activity = f"{pretty} - main sights", f"Explore the main sights and temples of {pretty}"
+            elif i == 1:
+                place, activity = f"{pretty} local market", "Local market walk and lunch"
+            else:
+                place, activity = f"{pretty} viewpoint / river side", "Relax, sunset and photography"
+            slots[slot] = {"place": place, "activity": activity, "transport": trans,
+                           "cost": int((200 if i == 0 else 120 if i == 1 else 60) * scale), "duration": mins}
+        slots["afternoon"]["lunch"] = "Local meals / darshini (₹60-120)"
+        days.append({"day": d, **slots,
+                     "night": {"accommodation": stay, "dinner": "Local restaurant / street food",
+                               "cost": int(450 * scale)}})
 
-    # Budget breakdown
     b_split = {
         "Transportation": int(budget * 0.28),
         "Accommodation": int(budget * 0.28),
@@ -257,6 +343,7 @@ def _demo_trip(trip_params: dict) -> dict:
             "Note: All prices are estimates. Verify before booking.",
         ],
         "_demo_mode": True,
+        "_ai_error": LAST_AI_ERROR[0] if GEMINI_API_KEY else "",
     }
 
 
@@ -306,14 +393,10 @@ def chat_with_ai(user_message: str, history: list = None) -> str:
     Returns AI response string.
     Falls back to demo responses if API is unavailable.
     """
-    if DEMO_MODE or not GENAI_AVAILABLE or not GEMINI_API_KEY:
+    if not _ai_ready():
         return get_demo_response(user_message)
 
     try:
-        handle = _get_model()
-        if handle is None:
-            return get_demo_response(user_message)
-
         # Build conversation context
         context = CHAT_SYSTEM_PROMPT + "\n\n"
         if history:
@@ -322,13 +405,7 @@ def chat_with_ai(user_message: str, history: list = None) -> str:
                 context += f"{role}: {msg['content']}\n"
         context += f"User: {user_message}\nAssistant:"
 
-        if GENAI_SDK == "new":
-            response = handle.models.generate_content(
-                model="gemini-2.0-flash", contents=context
-            )
-        else:
-            response = handle.generate_content(context)
-        return response.text
+        return call_ai(context)
     except Exception:
         return get_demo_response(user_message)
 
@@ -339,7 +416,7 @@ def get_budget_optimization_tips(trip_params: dict, budget_breakdown: dict) -> l
     """
     Ask AI for budget optimisation tips. Returns a list of tip strings.
     """
-    if DEMO_MODE or not GENAI_AVAILABLE or not GEMINI_API_KEY:
+    if not _ai_ready():
         return [
             f"Use KSRTC buses instead of private taxis – save approximately ₹{int(budget_breakdown.get('Transportation', 0) * 0.3):,}.",
             f"Choose hostels over budget hotels – save approximately ₹{int(budget_breakdown.get('Accommodation', 0) * 0.35):,}.",
