@@ -42,7 +42,7 @@ from svc_map_service import (
     lookup_coordinates, get_route, estimate_travel_options, extract_stops,
     format_hours, DAY_COLORS, find_places_along_route,
     suggest_places, build_india_map, TIER_HEX,
-    google_maps_link, per_person_costs, _label as route_label,
+    google_maps_link, per_person_costs, _label as route_label, find_places_near,
 )
 from svc_budget_service import apply_budget_split, calculate_budget, make_donut_chart
 from util_validators import validate_trip_form, validate_budget_inputs
@@ -444,12 +444,15 @@ def _render_map_dashboard(origin: str, destination: str, trip: dict = None, heig
             full = find_places_along_route(route["path"], radius_km=6.0, limit=18, online=True)
         if full:
             places = full
+    nearby = []
+    with st.spinner(f"Looking for temples and local sights near {destination}..."):
+        nearby = find_places_near(d, radius_km=15.0, limit=15)
     if trip:
         with st.spinner("Pinning your itinerary places on the map (first time takes a few seconds)..."):
             stops = extract_stops(trip, destination, d, max_stops=10)
-    if len(places) != len(quick) or stops:
+    if len(places) != len(quick) or stops or nearby:
         fmap2, ok2 = build_trip_map(origin, destination, stops=stops, route=route,
-                                    origin_coords=o, dest_coords=d, places=places)
+                                    origin_coords=o, dest_coords=d, places=places, nearby=nearby)
         if ok2 and fmap2:
             with map_slot.container():
                 render_map(fmap2, height=height)
@@ -457,6 +460,8 @@ def _render_map_dashboard(origin: str, destination: str, trip: dict = None, heig
     legend = "🏠 Blue = Start &nbsp;|&nbsp; ⭐ Red = Destination"
     if places:
         legend += " &nbsp;|&nbsp; 📷 Orange = famous places on the way"
+    if nearby:
+        legend += " &nbsp;|&nbsp; ⭐ Purple = temples & sights near destination"
     if stops:
         days = sorted({int(s["day"]) for s in stops})
         legend += " &nbsp;|&nbsp; Numbered pins = your plan: " + " ".join(
@@ -481,6 +486,21 @@ def _render_map_dashboard(origin: str, destination: str, trip: dict = None, heig
             st.caption("From OpenStreetMap and TripMate's India list: well-known places close to your route, in travel order.")
         else:
             st.info("No famous places found close to this route.")
+
+    # Temples & local sights near the destination
+    st.markdown(f'<div class="tm-section-header">🛕 Temples & local sights near {destination}</div>', unsafe_allow_html=True)
+    if nearby:
+        import html as _h
+        rows_html = "".join(
+            f'<div style="display:flex;justify-content:space-between;gap:12px;padding:8px 0;border-bottom:1px solid #f1f5f9;">'
+            f'<span style="color:#1e293b;font-weight:600;">{p["kind"].split(" ", 1)[0]} {_h.escape(p["name"])}'
+            f' <span style="color:#64748b;font-weight:400;font-size:0.8rem;">· {_h.escape(p["kind"].split(" ", 1)[1])}</span></span>'
+            f'<span style="color:#7c3aed;font-size:0.82rem;white-space:nowrap;">{p["km_away"]:.1f} km from {_h.escape(destination)}</span></div>'
+            for p in nearby)
+        st.markdown(f'<div class="tm-card">{rows_html}</div>', unsafe_allow_html=True)
+        st.caption("Purple stars on the map. Live from OpenStreetMap, within 15 km of the destination.")
+    else:
+        st.info("Couldn't load local temples right now (the map data service is busy). Try again in a minute.")
 
     # How to get there
     st.markdown('<div class="tm-section-header">🚦 How to get there (estimates)</div>', unsafe_allow_html=True)
