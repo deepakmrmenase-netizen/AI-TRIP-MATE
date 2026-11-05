@@ -367,9 +367,118 @@ DEMO_RESPONSES = {
 }
 
 
+_STOP_WORDS = {"the", "a", "an", "my", "your", "this", "that", "india", "trip", "budget", "me", "us", "it", "there",
+               "here", "weekend", "day", "days", "friends", "college", "students", "student", "winter", "summer"}
+
+
+def _find_place_in_message(msg: str):
+    """Return ('dataset', row_dict) | ('state', name) | ('online', (name, (lat, lon))) | None."""
+    import re
+    low = " " + re.sub(r"[^a-z0-9 ]+", " ", msg.lower()) + " "
+    try:
+        from data_loader import load_india_places
+        df = load_india_places()
+    except Exception:
+        return None
+    best = None
+    for _, r in df.iterrows():
+        names = [str(r["place"]).lower().split(" (")[0]] + [a.strip().lower() for a in str(r.get("aliases", "")).split(",") if a.strip()]
+        for n in names:
+            n2 = re.sub(r"[^a-z0-9 ]+", " ", n).strip()
+            if len(n2) >= 4 and f" {n2} " in low and (best is None or len(n2) > best[0]):
+                best = (len(n2), r.to_dict())
+    if best:
+        return "dataset", best[1]
+    for s in sorted(set(df["state"]), key=len, reverse=True):
+        if f" {s.lower()} " in low:
+            return "state", s
+    m = re.search(r"\b(?:in|to|at|near|around|visit|about|of|from)\s+([A-Za-z][A-Za-z .'-]{2,28}?)(?=\s+(?:for|from|with|please|trip|visit|in|and|how|what|is|are)\b|[?.!,]|$)", msg)
+    cands = [m.group(1).strip()] if m else []
+    for cand in cands:
+        words = [w for w in cand.split() if w.lower() not in _STOP_WORDS]
+        if not words:
+            continue
+        name = " ".join(words)
+        try:
+            from svc_map_service import lookup_coordinates
+            c = lookup_coordinates(name)
+        except Exception:
+            c = None
+        if c:
+            return "online", (name.title(), c)
+    return None
+
+
+def _place_answer(msg: str):
+    """Real answer about a place or state from TripMate's own data + live map data. None if no place found."""
+    found = _find_place_in_message(msg)
+    if not found:
+        return None
+    kind, val = found
+    try:
+        from data_loader import load_india_places
+        df = load_india_places()
+    except Exception:
+        return None
+
+    if kind == "state":
+        sub = df[(df["state"] == val) & (df["category"] != "Luxury Stay")].sort_values("budget_min").head(8)
+        lines = [f"- **{r.place}** - {r.category}, ₹{int(r.budget_min):,}-{int(r.budget_max):,} per person ({r.highlight.split(',')[0].strip()})"
+                 for r in sub.itertuples()]
+        return (f"🗺️ **Places to visit in {val}** (cheapest first):\n\n" + "\n".join(lines) +
+                "\n\n💡 Open **Explore Destinations** to filter by budget, type and see them on a map, or ask me about any of these places.")
+
+    if kind == "dataset":
+        r = val
+        name, center = str(r["place"]), (float(r["latitude"]), float(r["longitude"]))
+        head = (f"📍 **{name}, {r['state']}** - {r['category']}\n\n"
+                f"**Known for:** {r['highlight']}\n\n**Estimated cost:** ₹{int(r['budget_min']):,}-{int(r['budget_max']):,} per person (2-3 days)")
+        label = name
+    else:
+        name, center = val
+        head = f"📍 **{name}**"
+        label = name
+
+    parts = [head]
+    try:
+        spots = _nearby_spots(label, radius_km=40.0, want=12)
+        if spots:
+            parts.append(f"**{len(spots)} places to visit around {label}:**\n" +
+                         "\n".join(f"{i}. {n}" + (f" - {km:.0f} km away" if km > 3 else "") for i, (n, _, km) in enumerate(spots, 1)))
+    except Exception:
+        pass
+    try:
+        from svc_map_service import find_places_near
+        near = find_places_near(center, radius_km=15.0, limit=10)
+        if near:
+            parts.append("**🛕 Temples and local sights within 15 km (live map data):**\n" +
+                         "\n".join(f"- {p['name']} ({p['kind'].split(' ', 1)[1].lower()}) - {p['km_away']:.1f} km" for p in near))
+    except Exception:
+        pass
+    try:
+        from svc_map_service import haversine_km, lookup_coordinates
+        o = lookup_coordinates("Bengaluru")
+        km = haversine_km(o, center) * 1.25
+        if km > 5:
+            parts.append(f"**From Bengaluru:** about {km:,.0f} km by road. Bus roughly ₹{int(km * 1.0 / 10) * 10:,}-{int(km * 1.8 / 10) * 10:,}. "
+                         f"For the exact route, distance and famous places on the way, open **Trip Map**.")
+    except Exception:
+        pass
+    parts.append("💡 Want a day-by-day plan? Open **AI Trip Planner** and enter this place as your destination.")
+    return "\n\n".join(parts)
+
+
 def get_demo_response(user_message: str) -> str:
     """Return a canned demo response based on keywords in the user message."""
     msg = user_message.lower()
+    generic = any(k in msg for k in ["pack", "packing", "save money", "money tip", "photography", "hostel"])
+    if not generic:
+        try:
+            answer = _place_answer(user_message)
+        except Exception:
+            answer = None
+        if answer:
+            return answer
     if any(k in msg for k in ["mysuru", "mysore"]):
         return DEMO_RESPONSES["mysuru"]
     if any(k in msg for k in ["₹", "budget", "cheap trip", "under", "affordable", "3000", "2000", "5000"]):
