@@ -115,38 +115,101 @@ def _usable_models() -> list:
     return order
 
 
+def _gen_config(model: str, expect_json: bool, fast: bool) -> dict:
+    cfg = {"temperature": 0.4 if not expect_json else 0.7, "maxOutputTokens": 1100 if fast else 8192}
+    if expect_json:
+        cfg["responseMimeType"] = "application/json"
+    if fast and "2.5" in model:
+        cfg["thinkingConfig"] = {"thinkingBudget": 0}          # answer straight away instead of "thinking" first
+    return cfg
+
+
 def _rest_generate(prompt: str, expect_json: bool = False) -> str:
     """Call Gemini through its public web API. Needs only `requests` and the API key (no extra install)."""
     import requests
     problems = []
     for model in _usable_models()[:6]:
-        body = {"contents": [{"parts": [{"text": prompt}]}]}
-        if expect_json:
-            body["generationConfig"] = {"responseMimeType": "application/json"}
-        try:
-            r = requests.post(
-                f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
-                headers={"x-goog-api-key": GEMINI_API_KEY, "Content-Type": "application/json"},
-                json=body, timeout=45)
-        except Exception as exc:
-            problems.append(f"{model}: network error ({type(exc).__name__})")
-            continue
-        if r.status_code == 200:
+        for with_config in (True, False):
+            body = {"contents": [{"parts": [{"text": prompt}]}]}
+            if with_config:
+                body["generationConfig"] = _gen_config(model, expect_json, fast=not expect_json)
+            elif expect_json:
+                body["generationConfig"] = {"responseMimeType": "application/json"}
             try:
-                text = r.json()["candidates"][0]["content"]["parts"][0]["text"]
-                return text
+                r = requests.post(
+                    f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
+                    headers={"x-goog-api-key": GEMINI_API_KEY, "Content-Type": "application/json"},
+                    json=body, timeout=45)
+            except Exception as exc:
+                problems.append(f"{model}: network error ({type(exc).__name__})")
+                break
+            if r.status_code == 200:
+                try:
+                    return r.json()["candidates"][0]["content"]["parts"][0]["text"]
+                except Exception:
+                    problems.append(f"{model}: empty answer")
+                    break
+            try:
+                msg = r.json().get("error", {}).get("message", "")
             except Exception:
-                problems.append(f"{model}: empty answer")
-                continue
-        try:
-            msg = r.json().get("error", {}).get("message", "")
-        except Exception:
-            msg = ""
-        problems.append(f"{model}: HTTP {r.status_code} {msg[:90]}")
-        if r.status_code == 404:
-            _MODEL_CACHE["bad"].add(model)            # this model name is not available for this key
-        if r.status_code in (400, 401, 403) and "not found" not in msg.lower() and "not supported" not in msg.lower():
-            break                                     # bad / blocked key: other models fail too
+                msg = ""
+            if r.status_code == 400 and with_config and "api key" not in msg.lower():
+                continue                                   # model did not like the extra settings: retry plain
+            problems.append(f"{model}: HTTP {r.status_code} {msg[:90]}")
+            if r.status_code == 404:
+                _MODEL_CACHE["bad"].add(model)
+            if r.status_code in (400, 401, 403) and "not found" not in msg.lower() and "not supported" not in msg.lower():
+                raise RuntimeError(" | ".join(problems[:3]))
+            break
+    raise RuntimeError(" | ".join(problems[:3]) or "no Gemini model available for this key")
+
+
+def _rest_stream(prompt: str):
+    """Yield the answer piece by piece (so the user sees words appearing at once instead of waiting)."""
+    import requests, json as _json
+    problems = []
+    for model in _usable_models()[:4]:
+        for with_config in (True, False):
+            body = {"contents": [{"parts": [{"text": prompt}]}]}
+            if with_config:
+                body["generationConfig"] = _gen_config(model, False, fast=True)
+            try:
+                r = requests.post(
+                    f"https://generativelanguage.googleapis.com/v1beta/models/{model}:streamGenerateContent?alt=sse",
+                    headers={"x-goog-api-key": GEMINI_API_KEY, "Content-Type": "application/json"},
+                    json=body, timeout=45, stream=True)
+            except Exception as exc:
+                problems.append(f"{model}: network error ({type(exc).__name__})")
+                break
+            if r.status_code != 200:
+                try:
+                    msg = r.json().get("error", {}).get("message", "")
+                except Exception:
+                    msg = ""
+                if r.status_code == 400 and with_config and "api key" not in msg.lower():
+                    continue
+                problems.append(f"{model}: HTTP {r.status_code} {msg[:90]}")
+                if r.status_code == 404:
+                    _MODEL_CACHE["bad"].add(model)
+                if r.status_code in (400, 401, 403) and "not found" not in msg.lower() and "not supported" not in msg.lower():
+                    raise RuntimeError(" | ".join(problems[:3]))
+                break
+            got = False
+            for line in r.iter_lines(decode_unicode=True):
+                if not line or not line.startswith("data:"):
+                    continue
+                try:
+                    parts = _json.loads(line[5:].strip())["candidates"][0]["content"]["parts"]
+                    piece = "".join(p.get("text", "") for p in parts)
+                except Exception:
+                    continue
+                if piece:
+                    got = True
+                    yield piece
+            if got:
+                return
+            problems.append(f"{model}: empty answer")
+            break
     raise RuntimeError(" | ".join(problems[:3]) or "no Gemini model available for this key")
 
 
@@ -397,10 +460,15 @@ def _demo_trip(trip_params: dict) -> dict:
 
 # ─── Chat Assistant ────────────────────────────────────────────────────────────
 
-CHAT_SYSTEM_PROMPT = """You are TripMate AI Assistant – a friendly, knowledgeable student travel advisor for India.
-You help students plan affordable trips, suggest destinations, give packing tips, and answer travel questions.
-Be concise, helpful, and student-budget-focused.
-All price estimates are approximate and should be verified before travel.
+CHAT_SYSTEM_PROMPT = """You are TripMate AI, a travel assistant for Indian college students (budget travel in India).
+How to answer:
+- Answer the exact question asked, in 3-8 short lines or a short list. No long introductions, no repeating the question.
+- Use simple English, Indian context (KSRTC/state buses, IRCTC trains, darshini hotels, dharamshalas, UPI, Rs prices).
+- If VERIFIED MAP FACTS are given, use their numbers exactly (distances, drive times, place names). Never invent or change them.
+- Never invent exact prices, timings, phone numbers, ratings or opening hours. Give a realistic range and say "approx., please verify".
+- If you are not sure a place exists or you do not know, say so plainly and suggest checking Google Maps. Do not guess.
+- If the question is unclear (for example "near places" with no place), ask ONE short question to clarify.
+- For safety topics (night travel, trekking, rivers, forests) add one short safety tip.
 """
 
 DEMO_RESPONSES = {
@@ -815,35 +883,71 @@ def get_demo_response(user_message: str, history: list = None) -> str:
             "Type a place name and I'll tell you what is around it.")
 
 
+_FACT_HINTS = ("near", "nearby", "around", "distance", "how far", " km", "route", " to ", "visit", "places", "see in", "things to do",
+               "how many", "hotel", "stay", "lodge", "hostel", "food", "eat", "breakfast", "lunch", "dinner", "restaurant", "cafe",
+               "hospital", "pharmacy", "atm", "petrol", "bank", "temple", "falls", "beach")
+
+
+def _facts_with_limit(message: str, seconds: float = 5.0):
+    """Map facts, but never make the user wait more than a few seconds for them."""
+    low = " " + message.lower() + " "
+    if not any(h in low for h in _FACT_HINTS):
+        return None                                   # general question (tips, packing...): no map look-up needed
+    import concurrent.futures as cf
+    ex = cf.ThreadPoolExecutor(max_workers=1)
+    fut = ex.submit(_facts_for, message)
+    try:
+        return fut.result(timeout=seconds)
+    except Exception:
+        return None
+    finally:
+        ex.shutdown(wait=False)
+
+
+def _chat_prompt(user_message: str, history: list = None) -> str:
+    context = CHAT_SYSTEM_PROMPT + "\n"
+    if history:
+        for msg in history[-8:]:
+            role = "User" if msg["role"] == "user" else "Assistant"
+            context += f"{role}: {str(msg['content'])[:700]}\n"
+    facts = _facts_with_limit(user_message)
+    if facts:
+        context += ("\nVERIFIED MAP FACTS for this question (real road distances, drive times and nearby places from OpenStreetMap; "
+                    "use them exactly and put them in your own short words):\n" + facts + "\n\n")
+    return context + f"User: {user_message}\nAssistant:"
+
+
 def chat_with_ai(user_message: str, history: list = None) -> str:
-    """
-    Send a message to the AI chatbot.
-    Returns AI response string.
-    Falls back to demo responses if API is unavailable.
-    """
+    """One full answer (no streaming). Falls back to the built-in answer, saying why."""
     if not _ai_ready():
         return get_demo_response(user_message, history)
-
     try:
-        # Build conversation context
-        context = CHAT_SYSTEM_PROMPT + "\n\n"
-        if history:
-            for msg in history[-6:]:
-                role = "User" if msg["role"] == "user" else "Assistant"
-                context += f"{role}: {msg['content']}\n"
-        facts = _facts_for(user_message)
-        if facts:
-            context += ("VERIFIED MAP FACTS for this question (real road distances, times and nearby places from OpenStreetMap). "
-                        "Use these numbers exactly; never invent distances or travel times:\n" + facts + "\n\n")
-        context += f"User: {user_message}\nAssistant:"
-
-        answer = call_ai(context)
+        answer = call_ai(_chat_prompt(user_message, history))
         LAST_AI_ERROR[0] = ""
         return answer
     except Exception as exc:
         LAST_AI_ERROR[0] = str(exc)[:160]
-        note = (f"⚠️ *The AI service could not be reached ({LAST_AI_ERROR[0]}), so this is TripMate's built-in answer.*\n\n")
-        return note + get_demo_response(user_message, history)
+        return (f"⚠️ *The AI service could not be reached ({LAST_AI_ERROR[0]}), so this is TripMate's built-in answer.*\n\n"
+                + get_demo_response(user_message, history))
+
+
+def chat_stream(user_message: str, history: list = None):
+    """Same as chat_with_ai, but yields the answer in pieces so it appears word by word."""
+    if not _ai_ready():
+        yield get_demo_response(user_message, history)
+        return
+    started = False
+    try:
+        for piece in _rest_stream(_chat_prompt(user_message, history)):
+            started = True
+            yield piece
+        LAST_AI_ERROR[0] = ""
+    except Exception as exc:
+        LAST_AI_ERROR[0] = str(exc)[:160]
+        if started:
+            return                                   # keep what the AI already said
+        yield (f"⚠️ *The AI service could not be reached ({LAST_AI_ERROR[0]}), so this is TripMate's built-in answer.*\n\n"
+               + get_demo_response(user_message, history))
 
 
 # ─── Budget Optimisation AI ───────────────────────────────────────────────────
