@@ -800,6 +800,82 @@ def find_places_along_route(path, radius_km: float = 6.0, limit: int = 18, onlin
     return kept
 
 
+# ─── Temples & local sights around a place ──────────────────────────────────
+
+_RELIGION_KIND = {"hindu": "🛕 Temple", "jain": "🛕 Jain basadi", "buddhist": "🛕 Buddhist shrine",
+                  "muslim": "🕌 Mosque / Dargah", "christian": "⛪ Church", "sikh": "🛕 Gurudwara"}
+
+
+@st.cache_data(ttl=21600, show_spinner=False)
+def _nearby_cached(lat: float, lon: float, radius_m: int):
+    """Named temples / sights within radius of a point from OpenStreetMap. Raises on failure (not cached)."""
+    a = f"(around:{radius_m},{lat:.5f},{lon:.5f})"
+    body = (
+        f'nwr["name"]["amenity"="place_of_worship"]{a};'
+        f'nwr["name"]["tourism"~"^(attraction|viewpoint|museum|zoo)$"]{a};'
+        f'nwr["name"]["historic"~"^(castle|fort|palace|monument|ruins|temple)$"]{a};'
+        f'nwr["name"]["natural"~"^(waterfall|peak|hot_spring)$"]{a};'
+    )
+    query = f"[out:json][timeout:10];({body});out center 200;"
+    deadline = time.monotonic() + 14
+    for url in _OVERPASS_URLS:
+        if time.monotonic() > deadline:
+            break
+        try:
+            resp = requests.post(url, data={"data": query}, headers=_HEADERS, timeout=10)
+            if resp.status_code != 200:
+                continue
+            js = resp.json()
+            remark = str(js.get("remark", "")).lower()
+            if "error" in remark or "timed out" in remark or "out of memory" in remark:
+                continue
+            return js.get("elements", [])
+        except Exception:
+            continue
+    raise RuntimeError("places service unavailable")
+
+
+def find_places_near(center, radius_km: float = 15.0, limit: int = 15) -> list:
+    """
+    Temples and local sights around a place (e.g. Kigga Rishyashringeshwara near Sringeri).
+    Live from OpenStreetMap. Returns [] if the service is busy. Each item: name, kind, lat, lon, km_away.
+    """
+    if not center or time.monotonic() < _OVERPASS_DOWN_UNTIL[0]:
+        return []
+    try:
+        els = _nearby_cached(round(center[0], 4), round(center[1], 4), int(radius_km * 1000))
+    except Exception:
+        _OVERPASS_DOWN_UNTIL[0] = time.monotonic() + 180
+        return []
+    out, seen = [], []
+    for el in els:
+        tags = el.get("tags", {})
+        name = tags.get("name:en") or tags.get("name")
+        lat = el.get("lat") or (el.get("center") or {}).get("lat")
+        lon = el.get("lon") or (el.get("center") or {}).get("lon")
+        if not name or lat is None or lon is None:
+            continue
+        if tags.get("amenity") == "place_of_worship":
+            kind = _RELIGION_KIND.get(str(tags.get("religion", "")).lower(), "🛕 Place of worship")
+        else:
+            kind = _classify(tags)
+        km = haversine_km(center, (lat, lon))
+        n = name.lower()
+        score = (3 if "wikipedia" in tags else 2 if "wikidata" in tags else 0)
+        score += 1 if any(w in n for w in ("temple", "mandir", "devasthana", "matha", "mutt", "eshwara", "eshwar", "falls", "peak", "parvata")) else 0
+        score += 1 if tags.get("name:en") or all(ord(c) < 128 for c in name) else 0   # readable name
+        out.append({"name": name, "kind": kind, "lat": lat, "lon": lon, "km_away": km, "score": score})
+    out.sort(key=lambda p: (-p["score"], p["km_away"]))
+    kept = []
+    for p in out:
+        if any(p["name"].lower() == k["name"].lower() or haversine_km((p["lat"], p["lon"]), (k["lat"], k["lon"])) < 0.15 for k in kept):
+            continue
+        kept.append(p)
+    kept = kept[:limit]
+    kept.sort(key=lambda p: p["km_away"])
+    return kept
+
+
 # ─── Itinerary stops ──────────────────────────────────────────────────────────
 
 _PERIOD_LABEL = {"morning": "🌅 Morning", "afternoon": "☀️ Afternoon", "evening": "🌇 Evening"}
@@ -876,7 +952,7 @@ def _add_map_extras(m):
 
 
 def build_trip_map(origin: str, destination: str, stops: list = None, route: dict = None,
-                   origin_coords=None, dest_coords=None, places: list = None):
+                   origin_coords=None, dest_coords=None, places: list = None, nearby: list = None):
     """
     Build the Folium map. Returns (folium.Map, True) or (None, False).
     stops  : list from extract_stops()
@@ -941,6 +1017,16 @@ def build_trip_map(origin: str, destination: str, stops: list = None, route: dic
             [pl["lat"], pl["lon"]],
             icon=folium.Icon(color="orange", icon="camera", prefix="fa"),
             popup=folium.Popup(html, max_width=240),
+            tooltip=f"{pl['name']} ({pl['kind']})",
+        ).add_to(m)
+        points.append((pl["lat"], pl["lon"]))
+
+    # Temples & local sights around the destination (purple)
+    for pl in nearby or []:
+        folium.Marker(
+            [pl["lat"], pl["lon"]],
+            icon=folium.Icon(color="purple", icon="star", prefix="fa"),
+            popup=folium.Popup(f"<b>{pl['name']}</b><br>{pl['kind']}<br>{pl['km_away']:.1f} km from {destination}", max_width=240),
             tooltip=f"{pl['name']} ({pl['kind']})",
         ).add_to(m)
         points.append((pl["lat"], pl["lon"]))
